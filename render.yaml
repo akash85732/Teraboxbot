@@ -1,0 +1,22 @@
+# Render Build & Start configuration
+services:
+  - type: web
+    name: terabox-downloader-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: COOKIE_NDUS
+        sync: false
+      - key: OWNER_ID
+        sync: false
+      - key: DUMP_CHANNEL_ID
+        value: "0"
+      - key: PORT
+        value: "8080"
