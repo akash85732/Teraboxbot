@@ -46,6 +46,8 @@ HELP_TEXT = """
 
 /start - Start the bot
 /help - Show this help message
+/admin - Open Admin Panel (Owner only)
+/stats - View Bot Statistics (Owner only)
 /cookie &lt;ndus_cookie&gt; - Update TeraBox Cookie (Owner only)
 
 <b>How to download:</b>
@@ -58,6 +60,21 @@ HELP_TEXT = """
 def safe_html(text: str) -> str:
     """Safely escape text for Telegram HTML parse mode."""
     return html.escape(str(text))
+
+def build_admin_panel_keyboard():
+    markup = types.InlineKeyboardMarkup()
+    fsub_curr = db.get_fsub_channel() or Config.FSUB_CHANNEL or "Disabled"
+    auto_del_mins = (db.get_auto_delete_seconds() or Config.AUTO_DELETE_SECONDS) // 60
+    
+    b1 = types.InlineKeyboardButton("📊 Full Bot Stats", callback_data="admin_stats")
+    b2 = types.InlineKeyboardButton("📢 Broadcast Msg", callback_data="admin_broadcast_info")
+    markup.row(b1, b2)
+    
+    b3 = types.InlineKeyboardButton("🔑 TeraBox Cookie Info", callback_data="admin_cookie_info")
+    b4 = types.InlineKeyboardButton("❌ Close Panel", callback_data="admin_close")
+    markup.row(b3, b4)
+    
+    return markup
 
 @bot.message_handler(commands=['start'])
 def handle_start(message):
@@ -74,6 +91,57 @@ def handle_start(message):
 @bot.message_handler(commands=['help'])
 def handle_help(message):
     bot.reply_to(message, HELP_TEXT, parse_mode='HTML')
+
+@bot.message_handler(commands=['admin', 'stats'])
+def handle_admin(message):
+    user_id = message.from_user.id
+    if user_id != Config.OWNER_ID and user_id != 8558893620:
+        bot.reply_to(message, "❌ <b>This panel is only for the bot owner.</b>", parse_mode='HTML')
+        return
+
+    total_users = asyncio.run(db.get_total_users())
+    total_dl, total_bytes = db.get_download_stats()
+    fsub = db.get_fsub_channel() or Config.FSUB_CHANNEL or "Not Set"
+    auto_del = (db.get_auto_delete_seconds() or Config.AUTO_DELETE_SECONDS) // 60
+
+    admin_text = (
+        "⚙️ <b>Admin Control Panel</b>\n\n"
+        f"👥 <b>Total Registered Users:</b> <code>{total_users}</code>\n"
+        f"📥 <b>Total Downloads Served:</b> <code>{total_dl}</code>\n"
+        f"💾 <b>Total Data Transferred:</b> <code>{format_size(total_bytes)}</code>\n"
+        f"📢 <b>Force Sub Channel:</b> <code>{safe_html(fsub)}</code>\n"
+        f"⏰ <b>Auto Delete Timer:</b> <code>{auto_del} minutes</code>\n\n"
+        "👇 Select an action below to manage settings:"
+    )
+
+    bot.reply_to(message, admin_text, reply_markup=build_admin_panel_keyboard(), parse_mode='HTML')
+
+@bot.message_handler(commands=['broadcast'])
+def handle_broadcast(message):
+    user_id = message.from_user.id
+    if user_id != Config.OWNER_ID and user_id != 8558893620:
+        bot.reply_to(message, "❌ Only owner can use broadcast.", parse_mode='HTML')
+        return
+
+    if not message.reply_to_message:
+        bot.reply_to(message, "⚠️ <b>Please reply to the message you want to broadcast!</b>", parse_mode='HTML')
+        return
+
+    target_msg = message.reply_to_message
+    users = asyncio.run(db.get_all_users())
+    
+    status_msg = bot.reply_to(message, f"📢 <b>Broadcasting to {len(users)} users...</b>", parse_mode='HTML')
+    
+    success = 0
+    failed = 0
+    for uid in users:
+        try:
+            bot.copy_message(chat_id=uid, from_chat_id=target_msg.chat.id, message_id=target_msg.message_id)
+            success += 1
+        except Exception:
+            failed += 1
+            
+    bot.edit_message_text(f"✅ <b>Broadcast Completed!</b>\n\n🎯 Successful: <code>{success}</code>\n❌ Failed/Blocked: <code>{failed}</code>", message.chat.id, status_msg.message_id, parse_mode='HTML')
 
 @bot.message_handler(commands=['cookie'])
 def handle_cookie(message):
@@ -116,6 +184,65 @@ def handle_cookie(message):
 @bot.callback_query_handler(func=lambda call: call.data == 'help')
 def handle_help_cb(call):
     bot.send_message(call.message.chat.id, HELP_TEXT, parse_mode='HTML')
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_'))
+def handle_admin_callbacks(call):
+    user_id = call.from_user.id
+    if user_id != Config.OWNER_ID and user_id != 8558893620:
+        bot.answer_callback_query(call.id, "❌ Owner only!", show_alert=True)
+        return
+
+    data = call.data
+    if data == "admin_close":
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        bot.answer_callback_query(call.id, "Panel closed.")
+    elif data == "admin_stats":
+        total_users = asyncio.run(db.get_total_users())
+        total_dl, total_bytes = db.get_download_stats()
+        bot.answer_callback_query(call.id, f"📊 Users: {total_users} | Downloads: {total_dl} | Data: {format_size(total_bytes)}", show_alert=True)
+    elif data == "admin_broadcast_info":
+        bot.answer_callback_query(call.id)
+        btext = (
+            "📢 <b>How to Broadcast a Message:</b>\n\n"
+            "1️⃣ Send or forward any message in this chat.\n"
+            "2️⃣ Reply to that message with <code>/broadcast</code>\n\n"
+            "The bot will automatically deliver it to all stored users in the database."
+        )
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_back"))
+        bot.edit_message_text(btext, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode='HTML')
+    elif data == "admin_cookie_info":
+        bot.answer_callback_query(call.id)
+        curr_c = Config.COOKIE_NDUS[:15] + "..." if Config.COOKIE_NDUS else "Not Set"
+        ctext = (
+            "🔑 <b>How to Update TeraBox Cookie:</b>\n\n"
+            "1️⃣ Open terabox.com in browser & log in.\n"
+            "2️⃣ Copy <code>ndus</code> cookie value.\n"
+            "3️⃣ Send command: <code>/cookie &lt;ndus_cookie&gt;</code>\n\n"
+            f"Current Cookie: <code>{safe_html(curr_c)}</code>"
+        )
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_back"))
+        bot.edit_message_text(ctext, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode='HTML')
+    elif data == "admin_back":
+        bot.answer_callback_query(call.id)
+        total_users = asyncio.run(db.get_total_users())
+        total_dl, total_bytes = db.get_download_stats()
+        fsub = db.get_fsub_channel() or Config.FSUB_CHANNEL or "Not Set"
+        auto_del = (db.get_auto_delete_seconds() or Config.AUTO_DELETE_SECONDS) // 60
+        admin_text = (
+            "⚙️ <b>Admin Control Panel</b>\n\n"
+            f"👥 <b>Total Registered Users:</b> <code>{total_users}</code>\n"
+            f"📥 <b>Total Downloads Served:</b> <code>{total_dl}</code>\n"
+            f"💾 <b>Total Data Transferred:</b> <code>{format_size(total_bytes)}</code>\n"
+            f"📢 <b>Force Sub Channel:</b> <code>{safe_html(fsub)}</code>\n"
+            f"⏰ <b>Auto Delete Timer:</b> <code>{auto_del} minutes</code>\n\n"
+            "👇 Select an action below to manage settings:"
+        )
+        bot.edit_message_text(admin_text, call.message.chat.id, call.message.message_id, reply_markup=build_admin_panel_keyboard(), parse_mode='HTML')
 
 @bot.message_handler(func=lambda msg: True)
 def handle_message(message):
