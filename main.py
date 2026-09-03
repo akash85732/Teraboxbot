@@ -7,6 +7,13 @@ Starts the bot with a health check web server for Render deployment.
 import os
 import sys
 import asyncio
+
+# Fix Pyrogram event loop crash in Python 3.10+
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 import logging
 from threading import Thread
 
@@ -74,10 +81,6 @@ async def main():
 
     # Start the bot
     logger.info("🚀 Starting TeraBox Downloader Bot...")
-    try:
-        await bot.delete_webhook(drop=True)
-    except Exception as e:
-        logger.warning(f"Notice: Could not delete webhook: {e}")
     await bot.start()
 
     me = await bot.get_me()
