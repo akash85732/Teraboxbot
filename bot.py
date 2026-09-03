@@ -231,41 +231,60 @@ def build_admin_panel_keyboard() -> InlineKeyboardMarkup:
 # ==================== HANDLERS ====================
 
 
+def get_fsub_url(channel: str) -> str:
+    """Generate valid Telegram link for FSUB channel."""
+    ch_str = str(channel).strip()
+    if not ch_str or ch_str == "0":
+        return "https://t.me"
+    if ch_str.startswith("http://") or ch_str.startswith("https://"):
+        return ch_str
+    if ch_str.startswith("@"):
+        return f"https://t.me/{ch_str[1:]}"
+    if ch_str.startswith("-100"):
+        return f"https://t.me/c/{ch_str[4:]}"
+    return f"https://t.me/{ch_str}"
+
+
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(client: Client, message: Message):
     """Handle /start command."""
-    user_id = message.from_user.id
-    await db.add_user(user_id)
+    try:
+        user_id = message.from_user.id
+        await db.add_user(user_id)
 
-    # Force Subscribe Check
-    if not await check_fsub(client, user_id):
-        fsub_ch = db.get_fsub_channel() or Config.FSUB_CHANNEL
-        ch_link = (
-            f"https://t.me/{fsub_ch.replace('@', '')}"
-            if not str(fsub_ch).startswith("-100")
-            else "https://t.me/"
-        )
+        # Force Subscribe Check
+        if not await check_fsub(client, user_id):
+            fsub_ch = db.get_fsub_channel() or Config.FSUB_CHANNEL
+            ch_link = get_fsub_url(fsub_ch)
+            bot_username = (await client.get_me()).username
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("📢 Join Channel", url=ch_link)],
+                    [InlineKeyboardButton("🔄 Try Again", url=f"https://t.me/{bot_username}?start=start")],
+                ]
+            )
+            await message.reply_text(FSUB_TEXT, reply_markup=keyboard)
+            return
+
         keyboard = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("📢 Join Channel", url=ch_link)],
-                [InlineKeyboardButton("🔄 Try Again", url=f"https://t.me/{(await client.get_me()).username}?start=start")],
+                [
+                    InlineKeyboardButton("📖 Help", callback_data="help"),
+                ],
             ]
         )
-        await message.reply_text(FSUB_TEXT, reply_markup=keyboard)
-        return
+        await message.reply_text(
+            START_TEXT,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.error(f"Error in start_handler: {e}", exc_info=True)
+        try:
+            await message.reply_text(START_TEXT, disable_web_page_preview=True)
+        except Exception:
+            pass
 
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("📖 Help", callback_data="help"),
-            ],
-        ]
-    )
-    await message.reply_text(
-        START_TEXT,
-        reply_markup=keyboard,
-        disable_web_page_preview=True,
-    )
 
 
 @bot.on_message(filters.command("help") & filters.private)
@@ -494,15 +513,12 @@ async def message_handler(client: Client, message: Message):
     # Force Subscribe Guard
     if not await check_fsub(client, user_id):
         fsub_ch = db.get_fsub_channel() or Config.FSUB_CHANNEL
-        ch_link = (
-            f"https://t.me/{fsub_ch.replace('@', '')}"
-            if not str(fsub_ch).startswith("-100")
-            else "https://t.me/"
-        )
+        ch_link = get_fsub_url(fsub_ch)
+        bot_username = (await client.get_me()).username
         keyboard = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("📢 Join Channel", url=ch_link)],
-                [InlineKeyboardButton("🔄 Try Again", url=f"https://t.me/{(await client.get_me()).username}?start=start")],
+                [InlineKeyboardButton("🔄 Try Again", url=f"https://t.me/{bot_username}?start=start")],
             ]
         )
         await message.reply_text(FSUB_TEXT, reply_markup=keyboard)

@@ -74,6 +74,10 @@ async def main():
 
     # Start the bot
     logger.info("🚀 Starting TeraBox Downloader Bot...")
+    try:
+        await bot.delete_webhook(drop=True)
+    except Exception as e:
+        logger.warning(f"Notice: Could not delete webhook: {e}")
     await bot.start()
 
     me = await bot.get_me()
