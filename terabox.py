@@ -20,23 +20,22 @@ logger = logging.getLogger(__name__)
 
 # All known TeraBox domain patterns
 TERABOX_DOMAINS = [
-    r"terabox\.com",
-    r"terabox\.app",
-    r"teraboxapp\.com",
-    r"1024tera\.com",
-    r"4funbox\.com",
-    r"mirrobox\.com",
-    r"nephobox\.com",
-    r"freeterabox\.com",
-    r"terabox\.fun",
+    r"terabox[a-z0-9-]*\.[a-z]+",
+    r"1024tera[a-z0-9-]*\.[a-z]+",
+    r"4funbox[a-z0-9-]*\.[a-z]+",
+    r"mirrobox[a-z0-9-]*\.[a-z]+",
+    r"nephobox[a-z0-9-]*\.[a-z]+",
+    r"freeterabox[a-z0-9-]*\.[a-z]+",
+    r"flexcom[a-z0-9-]*\.[a-z]+",
+    r"terasharefile[a-z0-9-]*\.[a-z]+",
 ]
 
 TERABOX_PATTERN = re.compile(
-    r"https?://(?:www\.)?"
+    r"https?://(?:[a-zA-Z0-9-]+\.)*"
     + r"(?:"
     + "|".join(TERABOX_DOMAINS)
     + r")"
-    + r"/(?:s/[\w-]+|sharing/link\?surl=[\w-]+)",
+    + r"/(?:s/[^\s>]+|sharing/link\?surl=[^\s>]+)",
     re.IGNORECASE,
 )
 
