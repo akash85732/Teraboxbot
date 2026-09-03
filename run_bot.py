@@ -46,7 +46,7 @@ HELP_TEXT = """
 
 /start - Start the bot
 /help - Show this help message
-/admin - Open Interactive Admin Panel (Owner only)
+/cookie &lt;ndus_cookie&gt; - Update TeraBox Cookie (Owner only)
 
 <b>How to download:</b>
 1️⃣ Copy a TeraBox share link
@@ -74,6 +74,44 @@ def handle_start(message):
 @bot.message_handler(commands=['help'])
 def handle_help(message):
     bot.reply_to(message, HELP_TEXT, parse_mode='HTML')
+
+@bot.message_handler(commands=['cookie'])
+def handle_cookie(message):
+    user_id = message.from_user.id
+    if user_id != Config.OWNER_ID and user_id != 8558893620:
+        bot.reply_to(message, "⛔ Only bot owner can update TeraBox cookie.", parse_mode='HTML')
+        return
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.reply_to(message, "⚠️ <b>Usage:</b> <code>/cookie &lt;YOUR_NDUS_COOKIE&gt;</code>\n\nExample:\n<code>/cookie Yb45mLVpeHui_d1QYiGFD-deinXDF7gkf1CNt6eD</code>", parse_mode='HTML')
+        return
+
+    new_cookie = parts[1].strip()
+    Config.COOKIE_NDUS = new_cookie
+    
+    # Save to .env on VPS
+    env_path = "/root/terabox_bot/.env"
+    try:
+        if os.path.exists(env_path):
+            with open(env_path, "r") as f:
+                lines = f.readlines()
+            new_lines = []
+            found = False
+            for line in lines:
+                if line.startswith("COOKIE_NDUS="):
+                    new_lines.append(f"COOKIE_NDUS={new_cookie}\n")
+                    found = True
+                else:
+                    new_lines.append(line)
+            if not found:
+                new_lines.append(f"COOKIE_NDUS={new_cookie}\n")
+            with open(env_path, "w") as f:
+                f.writelines(new_lines)
+    except Exception as e:
+        logger.error(f"Error updating .env: {e}")
+
+    bot.reply_to(message, "✅ <b>TeraBox Cookie Updated Successfully!</b>\nBot will use the new session for downloads.", parse_mode='HTML')
 
 @bot.callback_query_handler(func=lambda call: call.data == 'help')
 def handle_help_cb(call):

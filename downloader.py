@@ -1,14 +1,14 @@
 """
-High-speed async file downloader with progress tracking.
+Async Downloader Module for TeraBox Bot
 
-Uses chunked downloads with configurable chunk size for maximum speed.
-Supports resume and progress callbacks.
+Handles file downloading from TeraBox direct links with progress tracking,
+speed calculation, and cancellation support.
 """
 
 import os
 import time
-import asyncio
 import logging
+import asyncio
 from typing import Optional, Callable, Awaitable
 
 import aiohttp
@@ -20,18 +20,19 @@ logger = logging.getLogger(__name__)
 
 
 class DownloadError(Exception):
-    """Custom exception for download errors."""
+    """Custom exception for download failures."""
+
     pass
 
 
 class Downloader:
-    """Async file downloader with progress tracking."""
+    """Async file downloader with progress callback support."""
 
     def __init__(self):
-        self._active_downloads: dict[str, bool] = {}  # task_id: cancelled
+        self._active_downloads: dict[str, bool] = {}
 
     def cancel_download(self, task_id: str):
-        """Cancel an active download."""
+        """Cancel an active download task."""
         if task_id in self._active_downloads:
             self._active_downloads[task_id] = True
 
@@ -47,19 +48,6 @@ class Downloader:
     ) -> str:
         """
         Download a file from URL to disk.
-
-        Args:
-            url: Direct download URL
-            filename: Target filename
-            file_size: Expected file size (for progress)
-            task_id: Unique task ID for cancellation
-            progress_callback: async callback(downloaded, total, speed_mbps)
-
-        Returns:
-            Full path to downloaded file
-
-        Raises:
-            DownloadError: On download failure
         """
         os.makedirs(Config.DOWNLOAD_DIR, exist_ok=True)
 
@@ -88,13 +76,14 @@ class Downloader:
                 "Chrome/125.0.0.0 Safari/537.36"
             ),
             "Accept": "*/*",
-            "Accept-Encoding": "gzip, deflate",
+            "Accept-Encoding": "identity",
             "Connection": "keep-alive",
-            "Referer": "https://www.terabox.app/",
+            "Referer": "https://www.1024tera.com/",
         }
 
         cookies = {
             "ndus": Config.COOKIE_NDUS,
+            "PANWEB": "1",
             "lang": "en",
         }
 
@@ -121,18 +110,22 @@ class Downloader:
                 timeout=timeout,
                 connector=connector,
             ) as session:
-                async with session.get(url) as resp:
+                async with session.get(url, allow_redirects=True) as resp:
                     if resp.status != 200:
                         raise DownloadError(
                             f"Download failed with status {resp.status}"
                         )
 
-                    # Update file size from response if not provided
+                    content_type = resp.headers.get("Content-Type", "").lower()
+                    if "json" in content_type or "html" in content_type:
+                        text_peek = await resp.text()
+                        if "errno" in text_peek or "verify" in text_peek or "<html" in text_peek.lower():
+                            raise DownloadError("TeraBox session/cookie expired or invalid link response. Update COOKIE_NDUS using /cookie command.")
+
                     content_length = resp.content_length
                     if content_length and not file_size:
                         file_size = content_length
 
-                    # Check file size limit
                     actual_size = file_size or content_length or 0
                     if actual_size > Config.MAX_FILE_SIZE:
                         raise DownloadError(
@@ -144,14 +137,12 @@ class Downloader:
                         async for chunk in resp.content.iter_chunked(
                             Config.CHUNK_SIZE
                         ):
-                            # Check for cancellation
                             if task_id and self._active_downloads.get(task_id, False):
                                 raise DownloadError("Download cancelled")
 
                             await f.write(chunk)
                             downloaded += len(chunk)
 
-                            # Progress callback (throttled to once per second)
                             now = time.time()
                             if progress_callback and (now - last_progress_time) >= 2:
                                 elapsed = now - start_time
@@ -167,7 +158,10 @@ class Downloader:
                                 )
                                 last_progress_time = now
 
-            # Final progress update
+            if downloaded < 1000:
+                _cleanup_file(filepath)
+                raise DownloadError("Downloaded file is empty or corrupted. TeraBox session/cookie expired.")
+
             if progress_callback:
                 elapsed = time.time() - start_time
                 speed = (
@@ -197,13 +191,12 @@ class Downloader:
 
 
 def _cleanup_file(filepath: str):
-    """Remove partially downloaded file."""
+    """Safely delete temporary file."""
     try:
-        if os.path.exists(filepath):
+        if filepath and os.path.exists(filepath):
             os.remove(filepath)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to cleanup file {filepath}: {e}")
 
 
-# Singleton downloader instance
 downloader = Downloader()
