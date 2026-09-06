@@ -60,6 +60,8 @@ TERABOX_PATTERN = re.compile(
 JS_TOKEN_RE = re.compile(r"fn%28%22([0-9A-Fa-f]+)%22")
 JS_TOKEN_RE_ALT = re.compile(r'fn\("([0-9A-Fa-f]+)"\)')
 JS_TOKEN_RE_RAW = re.compile(r"window\.jsToken\s*=\s*\"([0-9A-Fa-f]+)\"")
+JS_TOKEN_RE_2 = re.compile(r"jsToken\s*[=:]\s*[\"']([0-9A-Fa-f]{32,})[\"']")
+JS_TOKEN_RE_3 = re.compile(r"[\"']jsToken[\"']\s*:\s*[\"']([0-9A-Fa-f]{32,})[\"']")
 
 
 def extract_terabox_links(text: str) -> list[str]:
@@ -104,7 +106,7 @@ def get_headers() -> dict:
 
 def _extract_js_token(html: str) -> str:
     """Extract jsToken from the share page HTML (percent-encoded or decoded)."""
-    for pattern in (JS_TOKEN_RE, JS_TOKEN_RE_ALT, JS_TOKEN_RE_RAW):
+    for pattern in (JS_TOKEN_RE, JS_TOKEN_RE_ALT, JS_TOKEN_RE_RAW, JS_TOKEN_RE_2, JS_TOKEN_RE_3):
         m = pattern.search(html)
         if m and m.group(1):
             return m.group(1)
@@ -305,24 +307,33 @@ def _fetch_official_sync(
         return None
 
     if not js_token:
-        logger.warning(f"No jsToken for {base_url} - skipping shorturlinfo")
-        return None
+        logger.warning(f"No jsToken for {base_url} - trying shorturlinfo without it")
+    else:
+        logger.info(f"jsToken obtained for {base_url}")
 
-    # Step 2: shorturlinfo (official API)
-    info_url = f"{real_base}/api/shorturlinfo?shorturl={surl_id}&root=1&p=1&jsToken={js_token}"
+    # Step 2: shorturlinfo (official API) - jsToken optional, older API works without it
+    shorturl_param = quote(surl_id, safe="")
+    info_url = f"{real_base}/api/shorturlinfo?shorturl={shorturl_param}&root=1&p=1"
+    if js_token:
+        info_url += f"&jsToken={js_token}"
     api_headers = dict(headers)
     api_headers["Referer"] = final_url
     api_headers["Origin"] = real_base
     if cookie_header:
         api_headers["Cookie"] = cookie_header
 
+    data = None
     try:
         r2 = s.get(info_url, headers=api_headers, timeout=15)
-        if r2.status_code != 200:
-            return None
-        data = r2.json()
+        if r2.status_code == 200:
+            try:
+                data = r2.json()
+            except Exception:
+                data = None
     except Exception as e:
         logger.warning(f"shorturlinfo failed for {real_base}: {e}")
+
+    if not data:
         return None
 
     errno = data.get("errno", -1)
@@ -467,14 +478,29 @@ async def _try_third_party_api(link: str) -> Optional[dict]:
             logger.warning(f"Third party API {api_url} failed: {e}")
             continue
 
-    # Last resort fallback: TeraDownloadr (slow WordPress nonce flow)
-    try:
-        from teradownloadr import fetch_teradownloadr
-        td_res = await fetch_teradownloadr(link)
-        if td_res and td_res.get("download_link"):
-            return td_res
-    except Exception as e:
-        logger.warning(f"TeraDownloadr API fallback failed: {e}")
+    # Last resort fallback: additional third-party worker APIs
+    apis_extra = [
+        f"https://terabox-dl.qtamaki.hackclub.app/api?data={quote(link)}",
+        f"https://terabox.deno.dev/?url={quote(link)}",
+    ]
+    for api_url in apis_extra:
+        try:
+            timeout = aiohttp.ClientTimeout(total=12)
+            headers = get_headers()
+            connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
+            async with aiohttp.ClientSession(
+                headers=headers, timeout=timeout, connector=connector
+            ) as session:
+                async with session.get(api_url) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json(content_type=None)
+                    result = _extract_worker_result(data)
+                    if result:
+                        return result
+        except Exception as e:
+            logger.warning(f"Extra API {api_url} failed: {e}")
+            continue
 
     return None
 
