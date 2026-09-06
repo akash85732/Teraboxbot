@@ -486,10 +486,14 @@ def _start_health_server():
         logger.warning("Health server disabled: %s", e)
 
 
-if __name__ == "__main__":
+def start():
     logger.info("🚀 Starting TeraBox Bot (Pyrogram / MTProto)...")
     threading.Thread(target=_start_health_server, daemon=True).start()
     try:
         app.run()
     except KeyboardInterrupt:
         pass
+
+
+if __name__ == "__main__":
+    start()
