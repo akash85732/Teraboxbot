@@ -78,6 +78,11 @@ active_users: set[int] = set()
 dl_sem = asyncio.Semaphore(getattr(Config, "MAX_CONCURRENT_DOWNLOADS", 3))
 rate_limited: dict[int, float] = {}
 _pending: dict[int, str] = {}
+_cancel_req: dict[int, bool] = {}
+
+
+class DownloadCancelled(Exception):
+    pass
 
 
 def _owner_ids() -> list[int]:
@@ -145,7 +150,7 @@ def build_caption(filename: str, size) -> str:
     return (
         f"📁 <b>{safe_html(filename)}</b>\n"
         f"📦 <b>Size:</b> {format_size(size)}\n"
-        f"⚡ <b>Served by TeraBox Bot</b> ⚡"
+        f"⚡ <b>Enjoy Your File</b> ⚡"
     )
 
 
@@ -215,6 +220,7 @@ async def _check_member(client: Client, channel: str, user_id: int):
 async def handle_link(client: Client, message: Message, link: str):
     user_id = message.from_user.id if message.from_user else message.chat.id
     chat_id = message.chat.id
+    _cancel_req.pop(user_id, None)
 
     if is_banned(user_id):
         return
@@ -226,8 +232,9 @@ async def handle_link(client: Client, message: Message, link: str):
             try:
                 await client.send_message(
                     chat_id,
-                    f"🔒 <b>Force Subscribe</b>\n\n"
-                    f"Bot use karne ke liye pehle channel join karna hoga:\n👉 <b>{safe_html(fsub.lstrip('@'))}</b>",
+                    f"🔒 <b>Channel Join Karo</b>\n\n"
+                    f"Download shuru karne se pehle hamara channel join karna hoga:\n"
+                    f"👉 <b>{safe_html(fsub.lstrip('@'))}</b>",
                     parse_mode=ParseMode.HTML,
                     reply_markup=InlineKeyboardMarkup([[
                         InlineKeyboardButton("📢 Join Channel", url=_channel_link(fsub)),
@@ -241,8 +248,7 @@ async def handle_link(client: Client, message: Message, link: str):
     if not _can_use(user_id):
         await client.send_message(
             chat_id,
-            "⏳ Ek request pehle se process ho rahi hai / rate-limit active hai. "
-            "Ek minute baad try karo.",
+            "⏳ Pehle ka kaam abhi chalu hai. Thodi der baad try karo.",
         )
         return
 
@@ -253,7 +259,7 @@ async def handle_link(client: Client, message: Message, link: str):
     try:
         status_msg = await _send_status(
             client, chat_id,
-            "🔄 <b>Resolving link...</b>",
+            "🔄 <b>Aapka link process ho raha hai...</b>",
         )
 
         # threadpool: async event loop kabhi block nahi hone denge
@@ -275,6 +281,8 @@ async def handle_link(client: Client, message: Message, link: str):
         last_edit = {"t": 0.0}
 
         async def progress(downloaded: int, total: int, speed: float):
+            if _cancel_req.get(user_id):
+                raise DownloadCancelled()
             now = time.time()
             if now - last_edit["t"] < 2.0:
                 return
@@ -283,7 +291,7 @@ async def handle_link(client: Client, message: Message, link: str):
             filled = int(20 * pct / 100)
             bar = "█" * filled + "░" * (20 - filled)
             text = (
-                f"📥 <b>Downloading...</b>\n\n"
+                f"📥 <b>File download ho rahi hai...</b>\n\n"
                 f"📁 <code>{safe_html(file_name[:45])}</code>\n"
                 f"📦 <b>Size:</b> {format_size(total or file_size)}\n"
                 f"⚡ <b>Speed:</b> {speed:.2f} MB/s\n"
@@ -319,7 +327,7 @@ async def handle_link(client: Client, message: Message, link: str):
 
         await _edit_status(
             client, chat_id, status_msg.id,
-            f"📤 <b>Uploading to Telegram...</b>\n📁 <code>{safe_html(file_name[:45])}</code>",
+            f"📤 <b>Telegram par bheja ja raha hai...</b>\n📁 <code>{safe_html(file_name[:45])}</code>",
         )
 
         # Throttled edit: editing on every chunk makes Pyrogram's upload loop
@@ -328,6 +336,8 @@ async def handle_link(client: Client, message: Message, link: str):
         last_up_edit = {"t": 0.0, "b": 0}
 
         async def up_progress(current, total):
+            if _cancel_req.get(user_id):
+                raise DownloadCancelled()
             now = time.time()
             if now - last_up_edit["t"] < 2.0:
                 return
@@ -341,7 +351,7 @@ async def handle_link(client: Client, message: Message, link: str):
             try:
                 await client.edit_message_text(
                     chat_id, status_msg.id,
-                    f"📤 <b>Uploading to Telegram...</b>\n"
+                    f"📤 <b>Telegram par bheja ja raha hai...</b>\n"
                     f"📁 <code>{safe_html(file_name[:45])}</code>\n"
                     f"⚡ <b>Speed:</b> {speed:.2f} MB/s\n"
                     f"📊 <b>Progress:</b> {pct}%\n"
@@ -372,28 +382,51 @@ async def handle_link(client: Client, message: Message, link: str):
             mins = max(1, ad // 60)
             await _edit_status(
                 client, chat_id, status_msg.id,
-                f"✅ <b>Download Complete!</b>\n"
+                f"✅ <b>File mil gayi!</b>\n"
                 f"📁 <code>{safe_html(file_name)}</code> ({format_size(file_size)})\n\n"
-                f"⚠️ Ye file <b>{mins} min</b> baad auto-delete ho jayegi.\n"
+                f"⚠️ Ye file <b>{mins} min</b> ke baad delete ho jayegi.\n"
                 f"Save karne ke liye kisi bhi chat par <b>forward kar do</b> 🔖",
             )
             asyncio.create_task(_auto_delete(client, chat_id, sent.id, ad))
         else:
             await _edit_status(
                 client, chat_id, status_msg.id,
-                f"✅ <b>Download Complete!</b>\n"
+                f"✅ <b>File mil gayi!</b>\n"
                 f"📁 <code>{safe_html(file_name)}</code> ({format_size(file_size)})",
             )
 
+    except DownloadCancelled:
+        logger.info("Download cancelled by user %s", user_id)
+        rate_limited.pop(user_id, None)
+        text = "❌ <b>Cancel kar diya gaya.</b>\n\nChaho to naya link bhej kar dobara download karo."
+        if status_msg:
+            await _edit_status(client, chat_id, status_msg.id, text)
+        else:
+            await client.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+    except DownloadError as e:
+        logger.error("Download error: %s", e)
+        if "cancell" in str(e).lower():
+            rate_limited.pop(user_id, None)
+            text = "❌ <b>Cancel kar diya gaya.</b>\n\nChaho to naya link bhej kar dobara download karo."
+        else:
+            text = (
+                "❌ <b>File mil nahi payi.</b>\n\n"
+                "Thodi der baad dobara try karo."
+            )
+        if status_msg:
+            await _edit_status(client, chat_id, status_msg.id, text)
+        else:
+            await client.send_message(chat_id, text, parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error("Download error: %s", e, exc_info=True)
-        text = f"❌ <b>Download Failed:</b> {safe_html(str(e)[:250])}"
+        text = "❌ <b>File mil nahi payi.</b>\n\nThodi der baad dobara try karo."
         if status_msg:
             await _edit_status(client, chat_id, status_msg.id, text)
         else:
             await client.send_message(chat_id, text, parse_mode=ParseMode.HTML)
     finally:
         active_users.discard(user_id)
+        _cancel_req.pop(user_id, None)
         if filepath and os.path.exists(filepath):
             _cleanup_file(filepath)
 
@@ -576,10 +609,17 @@ async def admin_cmd(client: Client, message: Message):
 
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_cmd(client: Client, message: Message):
-    if _pending.pop(message.chat.id, None):
+    chat_id = message.chat.id
+    if _pending.pop(chat_id, None):
         await message.reply_text("❌ Action cancel kar diya gaya.")
+        return
+    user_id = message.from_user.id if message.from_user else chat_id
+    if user_id in active_users:
+        _cancel_req[user_id] = True
+        downloader.cancel_download(str(chat_id))
+        await message.reply_text("⏳ File cancel ho rahi hai, bas ek pal...")
     else:
-        await message.reply_text("Koi pending action nahi hai.")
+        await message.reply_text("Abhi koi file download nahi ho rahi hai.")
 
 
 @app.on_message(filters.private)
@@ -768,14 +808,14 @@ async def _fsub_check(client: Client, cb: CallbackQuery):
     status = await _check_member(client, fsub, target) if fsub else None
     if status is True:
         await cb.message.edit_text(
-            "✅ <b>Join Confirm!</b>\n\nAb apna TeraBox link dobara bhejo.",
+            "✅ <b>Join ho gaya!</b>\n\nAb apna TeraBox link bhejo.",
             parse_mode=ParseMode.HTML,
         )
     elif status is False:
         await cb.answer("❌ Channel abhi bhi join nahi kia!", show_alert=True)
     else:
         await cb.message.edit_text(
-            "⚠️ <b>Check nahi ho paya</b>.\n\nBot channel ka admin hona chahiye. Link waise bhi bhej sakte ho.",
+            "⚠️ <b>Check nahi ho paya.</b>\n\nChannel join kar liya hai to link bhej do.",
             parse_mode=ParseMode.HTML,
         )
 
