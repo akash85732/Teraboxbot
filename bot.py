@@ -12,15 +12,21 @@ Auto download + upload flow:
 """
 
 import os
+import io
 import re
-import asyncio
-import logging
+import math
 import time
-import html as html_mod
+import asyncio
+import inspect
+import logging
+import functools
 import threading
+import html as html_mod
+from pathlib import PurePath
 
-from pyrogram import Client, filters
+from pyrogram import Client, filters, raw
 from pyrogram.enums import ParseMode
+from pyrogram.session import Session
 from pyrogram.types import Message
 
 from config import Config
@@ -231,19 +237,28 @@ async def handle_link(client: Client, message: Message, link: str):
         # Throttled edit: editing on every chunk makes Pyrogram's upload loop
         # wait 4s per edit (Telegram EditMessage cooldown), which stalls the
         # upload itself. Only update the status message every few seconds.
-        last_up_edit = {"t": 0.0}
+        last_up_edit = {"t": 0.0, "b": 0}
 
         async def up_progress(current, total):
             now = time.time()
-            if now - last_up_edit["t"] < 4.0:
+            if now - last_up_edit["t"] < 2.0:
                 return
             last_up_edit["t"] = now
+            total = total or file_size or current
+            pct = min(100, int((current / total) * 100)) if total else 0
+            filled = int(20 * pct / 100)
+            bar = "█" * filled + "░" * (20 - filled)
+            speed = (current - last_up_edit["b"]) / (1024 * 1024 * 2.0)
+            last_up_edit["b"] = current
             try:
                 await client.edit_message_text(
                     chat_id, status_msg.id,
                     f"📤 <b>Uploading to Telegram...</b>\n"
                     f"📁 <code>{safe_html(file_name[:45])}</code>\n"
-                    f"📊 {current}/{total} bytes",
+                    f"⚡ <b>Speed:</b> {speed:.2f} MB/s\n"
+                    f"📊 <b>Progress:</b> {pct}%\n"
+                    f"<code>[{bar}]</code>\n"
+                    f"<code>{current / (1024 ** 2):.1f} / {total / (1024 ** 2):.1f} MB</code>",
                     parse_mode=ParseMode.HTML,
                 )
             except Exception:
@@ -291,7 +306,133 @@ def _resolve_sync(link: str) -> dict:
 
 
 # ---------------------------------------------------------------- app
-app = Client(
+# FAST MTProto upload: pyrogram's default save_file ships every big file over
+# a single media connection (one TCP stream), which caps throughput hard on
+# datacenter hosts like Render. This override shards the file across several
+# parallel media sessions (round-robin parts, same file_id) so we saturate the
+# host's real bandwidth. Quality/format is untouched - raw bytes, Telegram
+# reassembles parts and transcodes nothing.
+_UPLOAD_WORKERS = 6
+_UPLOAD_PART = 512 * 1024
+
+
+class FastUploadClient(Client):
+    async def save_file(
+        self,
+        path,
+        file_id: int = None,
+        file_part: int = 0,
+        progress: callable = None,
+        progress_args: tuple = (),
+    ):
+        async with self.save_file_semaphore:
+            if path is None:
+                return None
+
+            if isinstance(path, (str, PurePath)):
+                fp = open(path, "rb")
+            elif isinstance(path, io.IOBase):
+                fp = path
+            else:
+                raise ValueError(
+                    "Invalid file. Expected a file path as string or a binary (not text) file pointer"
+                )
+
+            file_name = getattr(fp, "name", "file.jpg")
+            fp.seek(0, os.SEEK_END)
+            file_size = fp.tell()
+            fp.seek(0)
+
+            if file_size == 0:
+                raise ValueError("File size equals to 0 B")
+
+            limit_mib = 4000 if getattr(getattr(self, "me", None), "is_premium", False) else 2000
+            if file_size > limit_mib * 1024 * 1024:
+                raise ValueError(f"Can't upload files bigger than {limit_mib} MiB")
+
+            total_parts = int(math.ceil(file_size / _UPLOAD_PART))
+
+            # Small / in-memory files: keep stock single-stream path.
+            if file_size <= 10 * 1024 * 1024 or not isinstance(path, (str, PurePath)):
+                if isinstance(path, (str, PurePath)) or isinstance(path, io.IOBase):
+                    fp.close()
+                return await super().save_file(path, file_id, file_part, progress, progress_args)
+
+            file_id = file_id or self.rnd_id()
+
+            dc_id = await self.storage.dc_id()
+            auth_key = await self.storage.auth_key()
+            test_mode = await self.storage.test_mode()
+
+            workers = min(_UPLOAD_WORKERS, total_parts)
+            sessions = [
+                Session(self, dc_id, auth_key, test_mode, is_media=True)
+                for _ in range(workers)
+            ]
+            for s in sessions:
+                await s.start()
+
+            uploaded_total = 0
+            lock = asyncio.Lock()
+            start_time = time.time()
+            last_cb_time = [0.0]
+
+            def read_chunk(handle, index):
+                handle.seek(index * _UPLOAD_PART)
+                return handle.read(_UPLOAD_PART)
+
+            async def upload_worker(widx):
+                nonlocal uploaded_total
+                with open(path, "rb") as handle:
+                    idx = widx
+                    while idx < total_parts:
+                        chunk = await asyncio.to_thread(read_chunk, handle, idx)
+                        await sessions[widx].invoke(
+                            raw.functions.upload.SaveBigFilePart(
+                                file_id=file_id,
+                                file_part=idx,
+                                file_total_parts=total_parts,
+                                bytes=chunk,
+                            )
+                        )
+                        async with lock:
+                            uploaded_total += len(chunk)
+                        idx += workers
+
+                        if progress is not None:
+                            now = time.time()
+                            if now - last_cb_time[0] >= 0.5:
+                                last_cb_time[0] = now
+                                moved = min(uploaded_total, file_size)
+                                if inspect.iscoroutinefunction(progress):
+                                    await progress(moved, file_size, *progress_args)
+                                else:
+                                    await self.loop.run_in_executor(
+                                        self.executor,
+                                        functools.partial(
+                                            progress, moved, file_size, *progress_args
+                                        ),
+                                    )
+
+            try:
+                await asyncio.gather(*(upload_worker(w) for w in range(workers)))
+            finally:
+                for s in sessions:
+                    await s.stop()
+                fp.close()
+
+            logger.info(
+                f"Parallel MTProto upload done: {file_size / (1024 ** 2):.2f} MB in "
+                f"{time.time() - start_time:.1f}s ({workers} connections)"
+            )
+            return raw.types.InputFileBig(
+                id=file_id,
+                parts=total_parts,
+                name=file_name,
+            )
+
+
+app = FastUploadClient(
     "railway_terabox",
     api_id=Config.API_ID,
     api_hash=Config.API_HASH,
