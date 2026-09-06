@@ -2,24 +2,13 @@
 """
 TeraBox Downloader Bot - Railway-ready (Pyrogram / MTProto)
 ===========================================================
-Hybrid architecture that solves every issue discovered during testing:
+Auto download + upload flow:
+    resolve -> parallel download (on host) -> MTProto upload -> done
 
-  1. FAST PATH (0 download): send URL straight to Telegram via HTTP Bot API
-     so TELEGRAM fetches the file from TeraBox's official /share/download
-     dlink. Verified working (1.7s API return, ok=True). No bandwidth used
-     by us, no disk used, instant.
-  2. MTProto UPLOAD path (button): when Telegram cannot fetch the dlink
-     (the transient "need verify_v2" wall), download on the host with a
-     parallel-ranged downloader (with JSON/verify sniffing) and upload via
-     Pyrogram MTProto (supports up to 2GB, the HTTP Bot API 50MB 413 limit
-     does not apply).
-  3. Railway-ready: env-var config, ephemeral-disk safe (always cleans up),
-     no supervisor required, optional health server on $PORT.
-
-Env vars (Railway dashboard / .env):
-  API_ID, API_HASH   from my.telegram.org
-  BOT_TOKEN          from @BotFather
-  OWNER_ID           telegram user id (optional)
+- No URL ever shown.
+- Single reply per request: message-level dedup kills duplicate /
+  looping replies (Telegram re-delivery), fixed workers=1.
+- MTProto upload supports up to 2GB (HTTP Bot API 50MB 413 limit gone).
 """
 
 import os
@@ -27,14 +16,12 @@ import re
 import asyncio
 import logging
 import time
-import uuid
 import html as html_mod
 import threading
 
-import requests
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message
 
 from config import Config
 from downloader import downloader, DownloadError, _cleanup_file
@@ -58,18 +45,27 @@ VIDEO_EXTENSIONS = {
     "mpeg", "mpg", "3gp", "f4v", "vob",
 }
 
-TG_API = f"https://api.telegram.org/bot{Config.BOT_TOKEN}"
-
-# Fast HTTP session for Telegram API calls (large timeouts)
-_tg_session = requests.Session()
-_a = requests.adapters.HTTPAdapter(max_retries=requests.adapters.Retry(
-    total=2, backoff_factor=2, status_forcelist=[429, 500, 502, 503],
-))
-_tg_session.mount("https://", _a)
-
 active_users: set[int] = set()
 dl_sem = asyncio.Semaphore(getattr(Config, "MAX_CONCURRENT_DOWNLOADS", 3))
 rate_limited: dict[int, float] = {}
+
+# ----------------------------------------------------- duplicate-message guard
+# Same (chat, message_id) delivered more than once (Telegram re-delivery or
+# looping) is ignored, so we never reply/work twice for one message.
+_handled: dict[tuple[int, int], float] = {}
+_HANDLED_TTL = 7200.0  # seconds
+
+
+def _mark_handled(chat_id: int, msg_id: int) -> bool:
+    key = (chat_id, msg_id)
+    now = time.time()
+    if len(_handled) >= 5000:
+        for k in [k for k, t in _handled.items() if now - t > _HANDLED_TTL]:
+            _handled.pop(k, None)
+    if key in _handled and now - _handled[key] < _HANDLED_TTL:
+        return False
+    _handled[key] = now
+    return True
 
 
 # ---------------------------------------------------------------- helpers
@@ -111,49 +107,6 @@ def _can_use(user_id: int) -> bool:
     return True
 
 
-# ---------------------------------------------------------------- fast path
-def _tg_send_video_by_url(chat_id, video_url, caption, timeout=600):
-    """Telegram Apache-side fetch: no upload, no disk, no size cap (URL method)."""
-    try:
-        r = _tg_session.post(
-            f"{TG_API}/sendVideo",
-            json={
-                "chat_id": chat_id,
-                "video": video_url,
-                "caption": caption,
-                "parse_mode": "HTML",
-                "supports_streaming": True,
-            },
-            timeout=timeout,
-        )
-        data = r.json()
-        if data.get("ok"):
-            return True, data.get("result", {})
-        return False, (data.get("description") or data.get("error") or "")
-    except Exception as e:
-        return False, str(e)
-
-
-def _pick_url_send_candidates(file_info: dict):
-    """Official non-m3u8 dlinks first; TeraBox worker links excluded (TG can't fetch them)."""
-    seen = set()
-    out = []
-    links = [file_info.get("download_link")] + (file_info.get("alt_links") or [])
-    for u in links:
-        if not u:
-            continue
-        if "streaming" in u or ".m3u8" in u.lower():
-            continue
-        if "dl-worker.teraboxdl.site" in u:
-            continue
-        if u in seen:
-            continue
-        seen.add(u)
-        out.append(u)
-    out.sort(key=lambda x: ("/share/download" in x or "terabox.app/share" in x) is False)
-    return out
-
-
 # ---------------------------------------------------------------- auto delete
 async def _auto_delete(client: Client, chat_id: int, msg_id: int, after: int):
     if not after or after <= 0:
@@ -165,7 +118,7 @@ async def _auto_delete(client: Client, chat_id: int, msg_id: int, after: int):
         pass
 
 
-# ---------------------------------------------------------------- handlers
+# ---------------------------------------------------------------- chat helpers
 async def _send_status(client: Client, chat_id: int, text: str):
     try:
         return await client.send_message(
@@ -176,16 +129,17 @@ async def _send_status(client: Client, chat_id: int, text: str):
         return None
 
 
-async def _edit_status(client: Client, chat_id: int, msg_id: int, text: str, markup=None):
+async def _edit_status(client: Client, chat_id: int, msg_id: int, text: str):
     try:
         return await client.edit_message_text(
             chat_id, msg_id, text, parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True, reply_markup=markup,
+            disable_web_page_preview=True,
         )
     except Exception:
         return None
 
 
+# ---------------------------------------------------------------- main flow
 async def handle_link(client: Client, message: Message, link: str):
     user_id = message.from_user.id if message.from_user else message.chat.id
     chat_id = message.chat.id
@@ -193,93 +147,117 @@ async def handle_link(client: Client, message: Message, link: str):
     if not _can_use(user_id):
         await client.send_message(
             chat_id,
-            "⏳ Pehle se ek request process ho rahi hai / rate-limit active hai. Ek minute baad try karo.",
+            "⏳ Ek request pehle se process ho rahi hai / rate-limit active hai. "
+            "Ek minute baad try karo.",
         )
         return
 
     status_msg = None
     filepath = None
+    file_name = ""
     active_users.add(user_id)
     try:
         status_msg = await _send_status(
             client, chat_id,
-            f"🔄 <b>Resolving link...</b>\n<code>{safe_html(link)}</code>",
+            "🔄 <b>Resolving link...</b>",
         )
 
-        # threadpool: async event loop ko kabhi block nahi hone denge
+        # threadpool: async event loop kabhi block nahi hone denge
         file_info = await asyncio.to_thread(_resolve_sync, link)
-        filename = file_info.get("filename") or ""
+        file_name = file_info.get("filename") or ""
         file_size = int(file_info.get("size") or file_info.get("file_size") or 0)
-        download_link = file_info.get("download_link")
-        alt_links = file_info.get("alt_links") or []
 
-        if not filename:
+        if not file_name:
             raise RuntimeError("Filename nahi mila - share link galat ya expired hai.")
 
-        ext = os.path.splitext(filename)[1].lstrip(".").lower()
-        caption = build_caption(filename, file_size)
+        ext = os.path.splitext(file_name)[1].lstrip(".").lower()
+        caption = build_caption(file_name, file_size)
 
         await _edit_status(
             client, chat_id, status_msg.id,
-            f"📁 <b>{safe_html(filename[:60])}</b>\n📦 {format_size(file_size)}",
+            f"📁 <b>{safe_html(file_name[:60])}</b>\n📦 {format_size(file_size)}",
         )
 
-        # ---- FAST PATH: ask Telegram to fetch it directly (0 download) ----
-        sent_ok = False
+        last_edit = {"t": 0.0}
+
+        async def progress(downloaded: int, total: int, speed: float):
+            now = time.time()
+            if now - last_edit["t"] < 2.0:
+                return
+            last_edit["t"] = now
+            pct = min(100, int((downloaded / total) * 100)) if total else 0
+            filled = int(20 * pct / 100)
+            bar = "█" * filled + "░" * (20 - filled)
+            text = (
+                f"📥 <b>Downloading...</b>\n\n"
+                f"📁 <code>{safe_html(file_name[:45])}</code>\n"
+                f"📦 <b>Size:</b> {format_size(total or file_size)}\n"
+                f"⚡ <b>Speed:</b> {speed:.2f} MB/s\n"
+                f"📊 <b>Progress:</b> {pct}%\n"
+                f"<code>[{bar}]</code>"
+            )
+            try:
+                await client.edit_message_text(
+                    chat_id, status_msg.id, text, parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+
+        task_id = str(chat_id)
+        async with dl_sem:
+            filepath = await downloader.download_file(
+                url=file_info.get("download_link"),
+                filename=file_name,
+                file_size=file_size,
+                task_id=task_id,
+                alt_urls=file_info.get("alt_links") or [],
+                progress_callback=progress,
+            )
+
+        # guard: verify_v2 / errno JSON kabhi upload nahi karenge
+        with open(filepath, "rb") as f:
+            head = f.read(4096).lstrip()
+        if head[:1] == b"{":
+            raise DownloadError(
+                "TeraBox verification required (verify_v2) - file abhi nahi mili. "
+                "Thodi der baad try karo."
+            )
+
+        await _edit_status(
+            client, chat_id, status_msg.id,
+            f"📤 <b>Uploading to Telegram...</b>\n📁 <code>{safe_html(file_name[:45])}</code>",
+        )
+
+        async def up_progress(current, total):
+            try:
+                await client.edit_message_text(
+                    chat_id, status_msg.id,
+                    f"📤 <b>Uploading to Telegram...</b>\n"
+                    f"📁 <code>{safe_html(file_name[:45])}</code>\n"
+                    f"📊 {current}/{total} bytes",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+
         if ext in VIDEO_EXTENSIONS:
-            for fast_url in _pick_url_send_candidates(file_info):
-                await _edit_status(
-                    client, chat_id, status_msg.id,
-                    "🚀 <b>Direct Transfer Mode...</b>\n⏳ Telegram TeraBox se file fetch kar raha hai...",
-                )
-                ok, res = await asyncio.to_thread(
-                    _tg_send_video_by_url, chat_id, fast_url, caption,
-                )
-                if ok:
-                    sent_ok = True
-                    logger.info("Fast-path URL send succeeded for %s", filename)
-                    await _edit_status(
-                        client, chat_id, status_msg.id,
-                        f"✅ <b>Download Complete!</b>\n📁 <code>{safe_html(filename)}</code> ({format_size(file_size)})",
-                    )
-                    if isinstance(res, dict) and res.get("message_id"):
-                        asyncio.create_task(
-                            _auto_delete(client, chat_id, res["message_id"],
-                                         getattr(Config, "AUTO_DELETE_SECONDS", 600))
-                        )
-                    return
-                else:
-                    logger.warning("Fast-path URL send failed: %s", res)
+            sent = await client.send_video(
+                chat_id, filepath, caption=caption, parse_mode=ParseMode.HTML,
+                supports_streaming=True, progress=up_progress,
+            )
+        else:
+            sent = await client.send_document(
+                chat_id, filepath, caption=caption, parse_mode=ParseMode.HTML,
+                progress=up_progress,
+            )
 
-        # ---- FALLBACK: button (no URL displayed ever) ----
-        cb_id = uuid.uuid4().hex[:10]
-        markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                "📥 Telegram me send karo (MTProto)",
-                callback_data=f"vpsdl_{cb_id}",
-            ),
-        ]])
         await _edit_status(
             client, chat_id, status_msg.id,
-            f"🎉 <b>File Mil Gaya!</b>\n\n"
-            f"📁 <b>{safe_html(filename)}</b>\n"
-            f"📦 <b>Size:</b> {format_size(file_size)}\n\n"
-            f"⚠️ Telegram is file ko TeraBox se <b>direct fetch</b> nahi kar paya. "
-            f"👇 <b>Telegram me send karo</b> dabao - file is chat me aayegi "
-            f"(<i>host se MTProto se bheji jayegi, isliye thoda time lagega</i>).",
-            markup=markup,
+            f"✅ <b>Download Complete!</b>\n📁 <code>{safe_html(file_name)}</code> ({format_size(file_size)})",
         )
-        # remember pending task
-        pending = getattr(app_state, "pending", None) or {}
-        pending[cb_id] = {
-            "chat_id": chat_id,
-            "user_id": user_id,
-            "link": link,
-            "filename": filename,
-            "size": file_size,
-        }
-        while len(pending) > 100:
-            del pending[next(iter(pending))]
+        asyncio.create_task(
+            _auto_delete(client, chat_id, sent.id, getattr(Config, "AUTO_DELETE_SECONDS", 600))
+        )
 
     except Exception as e:
         logger.error("Download error: %s", e, exc_info=True)
@@ -294,7 +272,6 @@ async def handle_link(client: Client, message: Message, link: str):
             _cleanup_file(filepath)
 
 
-# sync wrapper for terabox resolution (threadpool-friendly)
 def _resolve_sync(link: str) -> dict:
     from terabox import get_file_info
     loop = asyncio.new_event_loop()
@@ -304,136 +281,7 @@ def _resolve_sync(link: str) -> dict:
         loop.close()
 
 
-# ---------------------------------------------------------------- VPS download
-async def run_vps_download(client: Client, cb: CallbackQuery):
-    payload = (getattr(app_state, "pending", None) or {}).get(
-        cb.data[len("vpsdl_"):], {}
-    )
-    if not payload:
-        await cb.answer("⏳ Ya to link expire ho gaya, ya phir koi pending request nahi mili.")
-        return
-    chat_id = payload["chat_id"]
-    filename = payload["filename"]
-    file_size = payload["size"]
-
-    await cb.answer("Downloading...")
-
-    # remove from pending (one-shot)
-    (getattr(app_state, "pending", None) or {}).pop(cb.data[len("vpsdl_"):], None)
-
-    status = await client.edit_message_text(
-        chat_id, cb.message.id,
-        f"📥 <b>Downloading [MTProto]...</b>\n📁 <code>{safe_html(filename[:45])}</code>",
-        parse_mode=ParseMode.HTML,
-    )
-    task_id = str(chat_id)
-    last_edit = {"t": 0.0}
-
-    async def progress(downloaded: int, total: int, speed: float):
-        now = time.time()
-        if now - last_edit["t"] < 2.0:
-            return
-        last_edit["t"] = now
-        pct = min(100, int((downloaded / total) * 100)) if total else 0
-        filled = int(20 * pct / 100)
-        bar = "█" * filled + "░" * (20 - filled)
-        text = (
-            f"📥 <b>Downloading [MTProto]...</b>\n\n"
-            f"📁 <code>{safe_html(filename[:45])}</code>\n"
-            f"📦 <b>Size:</b> {format_size(total or file_size)}\n"
-            f"⚡ <b>Speed:</b> {speed:.2f} MB/s\n"
-            f"📊 <b>Progress:</b> {pct}%\n"
-            f"<code>[{bar}]</code>"
-        )
-        try:
-            await client.edit_message_text(chat_id, cb.message.id, text, parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
-
-    filepath = None
-    try:
-        async with dl_sem:
-            info = await asyncio.to_thread(_resolve_sync, payload["link"])
-            filepath = await downloader.download_file(
-                url=info.get("download_link"),
-                filename=filename,
-                file_size=file_size,
-                task_id=task_id,
-                alt_urls=info.get("alt_links") or [],
-                progress_callback=progress,
-            )
-
-        # guard: never upload a JSON/verify_v2 error body
-        with open(filepath, "rb") as f:
-            head = f.read(4096).lstrip()
-        if head[:1] == b"{":
-            raise DownloadError("TeraBox verification required (verify_v2) - abhi file nahi mili. Thodi der baad try karo.")
-
-        caption = build_caption(filename, file_size)
-        upload_status = await client.edit_message_text(
-            chat_id, cb.message.id,
-            f"📤 <b>Uploading to Telegram [MTProto]...</b>",
-            parse_mode=ParseMode.HTML,
-        )
-
-        async def up_progress(current, total):
-            try:
-                await client.edit_message_text(
-                    chat_id, cb.message.id,
-                    f"📤 <b>Uploading to Telegram [MTProto]...</b>\n"
-                    f"📁 <code>{safe_html(filename[:45])}</code>\n"
-                    f"📊 {current}/{total} bytes",
-                    parse_mode=ParseMode.HTML,
-                )
-            except Exception:
-                pass
-
-        ext = os.path.splitext(filename)[1].lstrip(".").lower()
-        if ext in VIDEO_EXTENSIONS:
-            sent = await client.send_video(
-                chat_id, filepath, caption=caption, parse_mode=ParseMode.HTML,
-                supports_streaming=True, progress=up_progress,
-            )
-        else:
-            sent = await client.send_document(
-                chat_id, filepath, caption=caption, parse_mode=ParseMode.HTML,
-                progress=up_progress,
-            )
-
-        await client.edit_message_text(
-            chat_id, cb.message.id,
-            f"✅ <b>Download Complete!</b>\n📁 <code>{safe_html(filename)}</code> ({format_size(file_size)})",
-            parse_mode=ParseMode.HTML,
-        )
-        asyncio.create_task(
-            _auto_delete(client, chat_id, sent.id, getattr(Config, "AUTO_DELETE_SECONDS", 600))
-        )
-
-    except Exception as e:
-        logger.error("VPS download error: %s", e, exc_info=True)
-        # exception inside to_thread/downloader may raise, so:
-        try:
-            err_text = str(e)
-            text = (
-                f"❌ <b>Download Failed:</b> {safe_html(err_text[:250])}"
-            )
-            await client.edit_message_text(chat_id, cb.message.id, text, parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
-    finally:
-        if filepath and os.path.exists(filepath):
-            _cleanup_file(filepath)
-        active_users.discard(chat_id)
-
-
 # ---------------------------------------------------------------- app
-class AppState:
-    def __init__(self):
-        self.pending: dict[str, dict] = {}
-
-
-app_state = AppState()
-
 app = Client(
     "railway_terabox",
     api_id=Config.API_ID,
@@ -444,26 +292,23 @@ app = Client(
 )
 
 
-# ---- telegraph handlers
 @app.on_message(filters.text & filters.private)
 async def on_private(client: Client, message: Message):
+    if message.from_user and not _mark_handled(message.chat.id, message.id):
+        return
     link = extract_link(message.text)
     if not link:
         await client.send_message(
             message.chat.id,
             "👋 <b>TeraBox Downloader Bot</b>\n\n"
             "Bas TeraBox share link bhejo (<code>terasharefile.com/s/...</code> ya "
-            "<code>terabox.app/s/...</code>) - video is chat me aa jayegi.\n\n"
-            "⚡ <b>Fast:</b> Telegram se direct fetch | <b>MTProto:</b> 2GB upload support",
+            "<code>terabox.app/s/...</code>) - file is chat me download karke "
+            "bhej di jayegi.\n\n"
+            "⚡ <b>MTProto:</b> 2GB tak file upload support",
             parse_mode=ParseMode.HTML,
         )
         return
     await handle_link(client, message, link)
-
-
-@app.on_callback_query(filters.regex(r"^vpsdl_"))
-async def on_vps_callback(client: Client, cb: CallbackQuery):
-    asyncio.create_task(run_vps_download(client, cb))
 
 
 # ---------------------------------------------------------------- health server
