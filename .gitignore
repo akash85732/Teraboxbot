@@ -1,7 +1,6 @@
 __pycache__/
 *.pyc
 *.pyo
-.env
 session/
 downloads/
 *.session
