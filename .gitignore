@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 *.pyo
+bot_db.json
 session/
 downloads/
 *.session

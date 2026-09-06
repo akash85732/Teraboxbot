@@ -25,12 +25,32 @@ import html as html_mod
 from pathlib import PurePath
 
 from pyrogram import Client, filters, raw
-from pyrogram.enums import ParseMode
+from pyrogram.enums import ChatMemberStatus, ParseMode
 from pyrogram.session import Session
-from pyrogram.types import Message
+from pyrogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from config import Config
 from downloader import downloader, DownloadError, _cleanup_file
+from db import (
+    all_users,
+    ban_user,
+    clear_fsub,
+    get_auto_delete,
+    get_fsub,
+    get_stats,
+    inc_download,
+    is_banned,
+    recent_users,
+    set_auto_delete,
+    set_fsub,
+    track_user,
+    unban_user,
+)
 
 # ---------------------------------------------------------------- logging
 logging.basicConfig(
@@ -41,8 +61,11 @@ logger = logging.getLogger("terabox_bot")
 
 # ---------------------------------------------------------------- constants
 LINK_RE = re.compile(
-    r"(?:https?://)?(?:www\d*\.)?(?:1024tera|terabox|terashare|teraboxapp|4funbox|mirrobox)"
-    r"\.(?:com|app|site|in)/s/1[\w-]+",
+    r"(?:https?://)?(?:www\d*\.)?"
+    r"(?:teraboxapp|terabox|1024terabox|1024tera|terasharefile|terafileshare|terashare|"
+    r"4funbox|mirrobox|nephobox|freeterabox)"
+    r"\.(?:com|app|site|in|net|org|top|vip)"
+    r"/s/1[\w-]+",
     re.IGNORECASE,
 )
 
@@ -54,6 +77,37 @@ VIDEO_EXTENSIONS = {
 active_users: set[int] = set()
 dl_sem = asyncio.Semaphore(getattr(Config, "MAX_CONCURRENT_DOWNLOADS", 3))
 rate_limited: dict[int, float] = {}
+_pending: dict[int, str] = {}
+
+
+def _owner_ids() -> list[int]:
+    raw_env = os.environ.get("OWNER_ID", "0").strip()
+    ids = []
+    for part in raw_env.split(","):
+        part = part.strip()
+        if part.lstrip("-").isdigit():
+            ids.append(int(part))
+    return ids
+
+
+def is_owner(user_id: int) -> bool:
+    return user_id in _owner_ids()
+
+
+def _channel_link(channel: str) -> str:
+    ch = channel.lstrip("@")
+    if ch.startswith("-100") and ch[4:].isdigit():
+        return f"https://t.me/c/{ch[4:]}"
+    return f"https://t.me/{ch}"
+
+
+def _fmt_uptime(started: float) -> str:
+    if not started:
+        return "n/a"
+    total = max(0, int(time.time() - started))
+    hours, rem = divmod(total, 3600)
+    minutes, seconds = divmod(rem, 60)
+    return f"{hours}h {minutes}m {seconds}s"
 
 # ----------------------------------------------------- duplicate-message guard
 # Same (chat, message_id) delivered more than once (Telegram re-delivery or
@@ -145,10 +199,44 @@ async def _edit_status(client: Client, chat_id: int, msg_id: int, text: str):
         return None
 
 
+async def _check_member(client: Client, channel: str, user_id: int):
+    try:
+        member = await client.get_chat_member(channel, user_id)
+        return member.status in (
+            ChatMemberStatus.OWNER,
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.MEMBER,
+        )
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------- main flow
 async def handle_link(client: Client, message: Message, link: str):
     user_id = message.from_user.id if message.from_user else message.chat.id
     chat_id = message.chat.id
+
+    if is_banned(user_id):
+        return
+
+    fsub = get_fsub() or Config.FSUB_CHANNEL
+    if fsub and not is_owner(user_id):
+        member = await _check_member(client, fsub, user_id)
+        if member is False:
+            try:
+                await client.send_message(
+                    chat_id,
+                    f"🔒 <b>Force Subscribe</b>\n\n"
+                    f"Bot use karne ke liye pehle channel join karna hoga:\n👉 <b>{safe_html(fsub.lstrip('@'))}</b>",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("📢 Join Channel", url=_channel_link(fsub)),
+                        InlineKeyboardButton("✅ Check Karo", callback_data=f"fsubc:{user_id}"),
+                    ]]),
+                )
+            except Exception:
+                pass
+            return
 
     if not _can_use(user_id):
         await client.send_message(
@@ -275,13 +363,27 @@ async def handle_link(client: Client, message: Message, link: str):
                 progress=up_progress,
             )
 
-        await _edit_status(
-            client, chat_id, status_msg.id,
-            f"✅ <b>Download Complete!</b>\n📁 <code>{safe_html(file_name)}</code> ({format_size(file_size)})",
-        )
-        asyncio.create_task(
-            _auto_delete(client, chat_id, sent.id, getattr(Config, "AUTO_DELETE_SECONDS", 600))
-        )
+        inc_download(file_size)
+
+        ad = get_auto_delete()
+        if ad is None:
+            ad = getattr(Config, "AUTO_DELETE_SECONDS", 600)
+        if ad and ad > 0:
+            mins = max(1, ad // 60)
+            await _edit_status(
+                client, chat_id, status_msg.id,
+                f"✅ <b>Download Complete!</b>\n"
+                f"📁 <code>{safe_html(file_name)}</code> ({format_size(file_size)})\n\n"
+                f"⚠️ Ye file <b>{mins} min</b> baad auto-delete ho jayegi.\n"
+                f"Save karne ke liye kisi bhi chat par <b>forward kar do</b> 🔖",
+            )
+            asyncio.create_task(_auto_delete(client, chat_id, sent.id, ad))
+        else:
+            await _edit_status(
+                client, chat_id, status_msg.id,
+                f"✅ <b>Download Complete!</b>\n"
+                f"📁 <code>{safe_html(file_name)}</code> ({format_size(file_size)})",
+            )
 
     except Exception as e:
         logger.error("Download error: %s", e, exc_info=True)
@@ -442,23 +544,321 @@ app = FastUploadClient(
 )
 
 
-@app.on_message(filters.text & filters.private)
+@app.on_message(filters.command(["start", "help"]) & filters.private)
+async def start_cmd(client: Client, message: Message):
+    if message.from_user:
+        track_user(message.from_user)
+    kb = []
+    if message.from_user and is_owner(message.from_user.id):
+        kb.append([InlineKeyboardButton("🔧 Admin Panel", callback_data="panel:home")])
+    await message.reply_text(
+        "👋 <b>TeraBox Downloader Bot</b>\n\n"
+        "Bas apna TeraBox / teraShare / 1024Tera share link bhejo.\n"
+        "File yahin download karke bhej di jayegi.\n\n"
+        "⚡ <b>Features:</b>\n"
+        "• Bade files support (2GB+) 📦\n"
+        "• Superfast parallel download & upload 🚀\n"
+        "• Auto channel join 🔒",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(kb) if kb else None,
+    )
+
+
+@app.on_message(filters.command("admin") & filters.private)
+async def admin_cmd(client: Client, message: Message):
+    if not (message.from_user and is_owner(message.from_user.id)):
+        return
+    _pending.pop(message.chat.id, None)
+    await message.reply_text(
+        _admin_text(), parse_mode=ParseMode.HTML, reply_markup=_admin_keyboard()
+    )
+
+
+@app.on_message(filters.command("cancel") & filters.private)
+async def cancel_cmd(client: Client, message: Message):
+    if _pending.pop(message.chat.id, None):
+        await message.reply_text("❌ Action cancel kar diya gaya.")
+    else:
+        await message.reply_text("Koi pending action nahi hai.")
+
+
+@app.on_message(filters.private)
 async def on_private(client: Client, message: Message):
-    if message.from_user and not _mark_handled(message.chat.id, message.id):
+    if message.from_user:
+        track_user(message.from_user)
+    if message.text and message.text.startswith("/"):
+        return
+    if _pending.get(message.chat.id):
+        await _handle_pending(client, message)
+        return
+    if not message.text:
+        return
+    if not _mark_handled(message.chat.id, message.id):
         return
     link = extract_link(message.text)
     if not link:
-        await client.send_message(
-            message.chat.id,
-            "👋 <b>TeraBox Downloader Bot</b>\n\n"
-            "Bas TeraBox share link bhejo (<code>terasharefile.com/s/...</code> ya "
-            "<code>terabox.app/s/...</code>) - file is chat me download karke "
-            "bhej di jayegi.\n\n"
-            "⚡ <b>MTProto:</b> 2GB tak file upload support",
-            parse_mode=ParseMode.HTML,
-        )
         return
     await handle_link(client, message, link)
+
+
+# ---------------------------------------------------------------- admin panel
+def _effective_auto_delete() -> int:
+    ad = get_auto_delete()
+    if ad is None:
+        ad = getattr(Config, "AUTO_DELETE_SECONDS", 600)
+    return ad
+
+
+def _auto_delete_state() -> str:
+    ad = _effective_auto_delete()
+    return f"{ad // 60} min" if ad and ad > 0 else "OFF"
+
+
+def _admin_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Statistics", callback_data="panel:stats")],
+        [InlineKeyboardButton("📢 Broadcast", callback_data="panel:broadcast")],
+        [InlineKeyboardButton("⏱ Auto-Delete", callback_data="panel:ad")],
+        [
+            InlineKeyboardButton("🔒 Force Join Set", callback_data="panel:gfsub"),
+            InlineKeyboardButton("🔓 Force Join Remove", callback_data="panel:rfsub"),
+        ],
+        [
+            InlineKeyboardButton("🚫 Ban User", callback_data="panel:ban"),
+            InlineKeyboardButton("✅ Unban User", callback_data="panel:unban"),
+        ],
+        [InlineKeyboardButton("🗑 Close", callback_data="panel:close")],
+    ])
+
+
+def _ad_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⏱ 10 min", callback_data="ad:600"),
+            InlineKeyboardButton("⏱ 20 min", callback_data="ad:1200"),
+        ],
+        [
+            InlineKeyboardButton("⏱ 30 min", callback_data="ad:1800"),
+            InlineKeyboardButton("⏱ 60 min", callback_data="ad:3600"),
+        ],
+        [InlineKeyboardButton("❌ Auto-Delete OFF", callback_data="ad:0")],
+        [InlineKeyboardButton("🔙 Back", callback_data="panel:home")],
+    ])
+
+
+def _admin_text() -> str:
+    return (
+        "👨‍💻 <b>Admin Panel</b>\n\n"
+        + _stats_text()
+        + f"\n⏱ <b>Auto-Delete:</b> {_auto_delete_state()}"
+    )
+
+
+def _stats_text() -> str:
+    s = get_stats()
+    fsub = get_fsub() or Config.FSUB_CHANNEL
+    lines = []
+    for uid, info in recent_users(10):
+        name = safe_html(info.get("name") or str(uid))
+        uname = info.get("username")
+        line = f"• {name}"
+        if uname:
+            line += f" (<code>@{safe_html(uname)}</code>)"
+        lines.append(line)
+    recent = "\n".join(lines) or "—"
+    return (
+        f"👥 <b>Total Users:</b> {s['total_users']}\n"
+        f"🟢 <b>Active Today:</b> {s['active_today']}\n"
+        f"🆕 <b>Joined Today:</b> {s['joined_today']}\n"
+        f"📥 <b>Total Downloads:</b> {s['downloads']}\n"
+        f"💾 <b>Data Served:</b> {format_size(s['bytes'])}\n"
+        f"🚫 <b>Banned:</b> {s['banned']}\n"
+        f"⏱ <b>Uptime:</b> {_fmt_uptime(s['started'])}\n"
+        f"🔒 <b>Force Join:</b> <code>{safe_html(fsub)}</code>\n\n"
+        f"👤 <b>Recent Users:</b>\n{recent}"
+    )
+
+
+async def _handle_pending(client: Client, message: Message) -> bool:
+    chat_id = message.chat.id
+    action = _pending.pop(chat_id, None)
+    if not action:
+        return False
+    if action == "broadcast":
+        await _do_broadcast(client, message)
+    elif action == "fsub":
+        value = (message.text or "").strip().lstrip("@")
+        if value:
+            set_fsub(value)
+            await _send_status(
+                client, chat_id,
+                f"✅ Force join channel set: <code>{safe_html(value)}</code>",
+            )
+        else:
+            await _send_status(client, chat_id, "❌ Channel value invalid hai.")
+    elif action == "ban":
+        await _ban_by_input(client, message, ban=True)
+    elif action == "unban":
+        await _ban_by_input(client, message, ban=False)
+    return True
+
+
+async def _do_broadcast(client: Client, message: Message):
+    chat_id = message.chat.id
+    targets = [uid for uid in all_users() if uid != chat_id]
+    if not targets:
+        await _send_status(client, chat_id, "❌ Broadcast ke liye koi user registered nahi hai.")
+        return
+    info = await message.reply_text(
+        f"📢 <b>Broadcast Chalu...</b>\n👥 Total: {len(targets)}\n✅ Done: 0\n❌ Fail: 0",
+        parse_mode=ParseMode.HTML,
+    )
+    ok = fail = 0
+    for uid in targets:
+        try:
+            await message.copy(uid)
+            ok += 1
+        except Exception:
+            fail += 1
+        try:
+            await info.edit_text(
+                f"📢 <b>Broadcast Chalu...</b>\n👥 Total: {len(targets)}\n✅ Done: {ok}\n❌ Fail: {fail}",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+    try:
+        await info.edit_text(
+            f"📢 <b>Broadcast Complete!</b>\n👥 Total: {len(targets)}\n✅ Delivered: {ok}\n❌ Failed: {fail}",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        pass
+
+
+async def _ban_by_input(client: Client, message: Message, ban: bool):
+    target = (message.text or "").strip()
+    uid = None
+    if target.lstrip("-").isdigit():
+        uid = int(target)
+    elif target:
+        try:
+            user = await client.get_users(target.lstrip("@"))
+            uid = user.id
+        except Exception:
+            uid = None
+    if uid and not is_owner(uid):
+        if ban:
+            ban_user(uid)
+            await _send_status(client, message.chat.id, f"🚫 User <code>{uid}</code> ko ban kar diya.")
+        else:
+            unban_user(uid)
+            await _send_status(client, message.chat.id, f"✅ User <code>{uid}</code> ka ban hata diya.")
+    else:
+        hint = "ban" if ban else "unban"
+        await _send_status(client, message.chat.id, f"❌ Valid user id/username bhejo ({hint}).")
+
+
+async def _fsub_check(client: Client, cb: CallbackQuery):
+    try:
+        target = int(cb.data.split(":", 1)[1])
+    except Exception:
+        return
+    fsub = get_fsub() or Config.FSUB_CHANNEL
+    status = await _check_member(client, fsub, target) if fsub else None
+    if status is True:
+        await cb.message.edit_text(
+            "✅ <b>Join Confirm!</b>\n\nAb apna TeraBox link dobara bhejo.",
+            parse_mode=ParseMode.HTML,
+        )
+    elif status is False:
+        await cb.answer("❌ Channel abhi bhi join nahi kia!", show_alert=True)
+    else:
+        await cb.message.edit_text(
+            "⚠️ <b>Check nahi ho paya</b>.\n\nBot channel ka admin hona chahiye. Link waise bhi bhej sakte ho.",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+@app.on_callback_query()
+async def on_callback(client: Client, cb: CallbackQuery):
+    data = cb.data or ""
+    if not cb.message:
+        return
+    if data.startswith("fsubc:"):
+        if cb.from_user and cb.from_user.id == cb.message.chat.id:
+            await _fsub_check(client, cb)
+        else:
+            await cb.answer("Yeh check aap apne chat me kar sakte ho.")
+        return
+    if not (cb.from_user and is_owner(cb.from_user.id)):
+        await cb.answer("Access Denied ❌", show_alert=True)
+        return
+    chat_id = cb.message.chat.id
+    if data == "panel:home":
+        await cb.message.edit_text(
+            _admin_text(), parse_mode=ParseMode.HTML, reply_markup=_admin_keyboard()
+        )
+    elif data == "panel:stats":
+        await cb.message.edit_text(
+            _stats_text(), parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="panel:home")]
+            ]),
+        )
+    elif data == "panel:broadcast":
+        _pending[chat_id] = "broadcast"
+        await cb.message.edit_text(
+            "✍️ <b>Broadcast</b>\n\nJo message broadcast karni hai bhejo (text / photo / video / document / forward).\n\n/cancel se cancel.",
+            parse_mode=ParseMode.HTML,
+        )
+    elif data == "panel:ad":
+        await cb.message.edit_text(
+            "⏱ <b>Auto-Delete</b>\n\n"
+            f"Abhi: <b>{_auto_delete_state()}</b>\n\n"
+            "Bot jo bhi file bhejega, set time ke baad automatically delete ho jayegi.\n"
+            "User ko pehle hi bataya jayega ki forward karke save kare 🔖",
+            parse_mode=ParseMode.HTML,
+            reply_markup=_ad_keyboard(),
+        )
+    elif data.startswith("ad:"):
+        try:
+            secs = int(data.split(":", 1)[1])
+        except Exception:
+            secs = 0
+        set_auto_delete(secs)
+        msg = f"✅ Auto-delete set: <b>{secs // 60} min</b>" if secs else "✅ Auto-delete <b>OFF</b>"
+        await cb.message.edit_text(
+            msg + "\n\n⏱ <b>Auto-Delete</b>\n\nAbhi: <b>" + _auto_delete_state() + "</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=_ad_keyboard(),
+        )
+    elif data == "panel:gfsub":
+        _pending[chat_id] = "fsub"
+        await cb.message.edit_text(
+            "📢 <b>Force Join Channel Set</b>\n\nChannel ka <code>@username</code> ya integer id (e.g. <code>-1001234567890</code>) bhejo.\n\n/cancel se cancel.",
+            parse_mode=ParseMode.HTML,
+        )
+    elif data == "panel:rfsub":
+        clear_fsub()
+        await cb.message.edit_text(
+            _admin_text(), parse_mode=ParseMode.HTML, reply_markup=_admin_keyboard()
+        )
+    elif data == "panel:ban":
+        _pending[chat_id] = "ban"
+        await cb.message.edit_text(
+            "🚫 <b>Ban User</b>\n\nUser ki numeric id ya <code>@username</code> bhejo.\n\n/cancel se cancel.",
+            parse_mode=ParseMode.HTML,
+        )
+    elif data == "panel:unban":
+        _pending[chat_id] = "unban"
+        await cb.message.edit_text(
+            "✅ <b>Unban User</b>\n\nUser ki numeric id ya <code>@username</code> bhejo.\n\n/cancel se cancel.",
+            parse_mode=ParseMode.HTML,
+        )
+    elif data == "panel:close":
+        await cb.message.delete()
+    await cb.answer()
 
 
 # ---------------------------------------------------------------- health server
