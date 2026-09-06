@@ -201,7 +201,7 @@ async def _get_worker_direct(link: str) -> str:
     near-instant delivery with no VPS-side re-upload at all.
     """
 
-    def _worker_teraboxdl_site() -> str:
+    def _worker_tdl_direct() -> str:
         try:
             s = requests.Session()
             s.verify = False
@@ -248,7 +248,7 @@ async def _get_worker_direct(link: str) -> str:
         return ""
 
     results = await asyncio.gather(
-        asyncio.to_thread(_worker_teraboxdl_site),
+        asyncio.to_thread(_worker_tdl_direct),
         asyncio.to_thread(_worker_nepcoder),
         asyncio.to_thread(_worker_uday),
     )
@@ -455,13 +455,20 @@ async def _try_api_endpoint(
 
 async def _try_third_party_api(link: str) -> Optional[dict]:
     """Try third-party TeraBox API worker extractors (last resort)."""
+    timeout = aiohttp.ClientTimeout(total=15)
+    headers = get_headers()
+
+    # PRIMARY fallback: teraboxdl.site - stable cookie-free worker that returns
+    # a direct download link (works from data-center IPs where TeraBox blocks
+    # official JS/session APIs with a bot-check).
+    direct = await _worker_teraboxdl_site(link)
+    if direct:
+        return direct
+
     apis = [
         f"https://teraboxvideodownloader.nepcoderdevs.workers.dev/api?data={quote(link)}",
         f"https://terabox.udayscriptsx.workers.dev/api?data={quote(link)}",
     ]
-
-    timeout = aiohttp.ClientTimeout(total=12)
-    headers = get_headers()
 
     for api_url in apis:
         try:
@@ -485,8 +492,6 @@ async def _try_third_party_api(link: str) -> Optional[dict]:
     ]
     for api_url in apis_extra:
         try:
-            timeout = aiohttp.ClientTimeout(total=12)
-            headers = get_headers()
             connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
             async with aiohttp.ClientSession(
                 headers=headers, timeout=timeout, connector=connector
@@ -503,6 +508,53 @@ async def _try_third_party_api(link: str) -> Optional[dict]:
             continue
 
     return None
+
+
+def _worker_teraboxdl_site_sync(link: str) -> Optional[dict]:
+    """Query the teraboxdl.site POST API (returns file info + cookie-free direct link)."""
+    try:
+        url = link if link.startswith("http") else f"https://{link}"
+        s = requests.Session()
+        s.verify = False
+        r = s.post(
+            "https://api.teraboxdl.site/api/test",
+            json={"url": url},
+            timeout=15,
+        )
+        data = r.json()
+        if data.get("status") != "success" or "data" not in data:
+            return None
+        inner = data["data"]
+        file_list = inner.get("list") or []
+        if not file_list:
+            return None
+        item = file_list[0]
+        filename = item.get("server_filename") or item.get("filename") or "terabox_video.mp4"
+        size = int(item.get("size", item.get("size_bytes", 0)) or 0)
+        dlink = (
+            item.get("direct_link")
+            or item.get("stream_download_url")
+            or item.get("download_link")
+            or ""
+        )
+        if not dlink:
+            return None
+        return {
+            "filename": filename,
+            "size": size,
+            "thumbnail": "",
+            "download_link": dlink,
+            "alt_links": [],
+            "is_dir": False,
+        }
+    except Exception as e:
+        logger.warning(f"teraboxdl.site API failed: {e}")
+        return None
+
+
+async def _worker_teraboxdl_site(link: str) -> Optional[dict]:
+    """Async wrapper for teraboxdl.site query."""
+    return await asyncio.to_thread(_worker_teraboxdl_site_sync, link)
 
 
 def _extract_worker_result(data) -> Optional[dict]:
