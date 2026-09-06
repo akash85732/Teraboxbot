@@ -228,7 +228,16 @@ async def handle_link(client: Client, message: Message, link: str):
             f"📤 <b>Uploading to Telegram...</b>\n📁 <code>{safe_html(file_name[:45])}</code>",
         )
 
+        # Throttled edit: editing on every chunk makes Pyrogram's upload loop
+        # wait 4s per edit (Telegram EditMessage cooldown), which stalls the
+        # upload itself. Only update the status message every few seconds.
+        last_up_edit = {"t": 0.0}
+
         async def up_progress(current, total):
+            now = time.time()
+            if now - last_up_edit["t"] < 4.0:
+                return
+            last_up_edit["t"] = now
             try:
                 await client.edit_message_text(
                     chat_id, status_msg.id,
