@@ -26,6 +26,7 @@ def _ensure():
     _data.setdefault("banned", [])
     _data.setdefault("fsub", "")
     _data.setdefault("auto_delete", None)
+    _data.setdefault("welcome", "")
     _data.setdefault("stats", {})
     now = time.time()
     st = _data["stats"]
@@ -135,6 +136,23 @@ def inc_download(size: int) -> None:
     st["downloads"] = int(st.get("downloads", 0)) + 1
     st["bytes"] = int(st.get("bytes", 0)) + int(size or 0)
     _save()
+
+
+# ================= WELCOME MESSAGE =================
+
+def get_welcome() -> str:
+    _ensure()
+    return str(_data.get("welcome") or "")
+
+
+def set_welcome(text: str) -> None:
+    _ensure()
+    _data["welcome"] = (text or "").strip()
+    _save()
+
+
+def clear_welcome() -> None:
+    set_welcome("")
 
 
 def _joined_today() -> int:

@@ -25,7 +25,7 @@ import html as html_mod
 from pathlib import PurePath
 
 from pyrogram import Client, filters, raw
-from pyrogram.enums import ChatMemberStatus, ParseMode
+from pyrogram.enums import ChatMemberStatus, ParseMode, ButtonStyle
 from pyrogram.session import Session
 from pyrogram.types import (
     CallbackQuery,
@@ -40,14 +40,17 @@ from db import (
     all_users,
     ban_user,
     clear_fsub,
+    clear_welcome,
     get_auto_delete,
     get_fsub,
     get_stats,
+    get_welcome,
     inc_download,
     is_banned,
     recent_users,
     set_auto_delete,
     set_fsub,
+    set_welcome,
     track_user,
     unban_user,
 )
@@ -237,8 +240,8 @@ async def handle_link(client: Client, message: Message, link: str):
                     f"👉 <b>{safe_html(fsub.lstrip('@'))}</b>",
                     parse_mode=ParseMode.HTML,
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("📢 Join Channel", url=_channel_link(fsub)),
-                        InlineKeyboardButton("✅ Check Karo", callback_data=f"fsubc:{user_id}"),
+                        InlineKeyboardButton("📢 Join Channel", url=_channel_link(fsub), style=ButtonStyle.PRIMARY),
+                        InlineKeyboardButton("✅ Check Karo", callback_data=f"fsubc:{user_id}", style=ButtonStyle.SUCCESS),
                     ]]),
                 )
             except Exception:
@@ -583,17 +586,23 @@ async def start_cmd(client: Client, message: Message):
         track_user(message.from_user)
     kb = []
     if message.from_user and is_owner(message.from_user.id):
-        kb.append([InlineKeyboardButton("🔧 Admin Panel", callback_data="panel:home")])
+        kb.append([InlineKeyboardButton("🔧 Admin Panel", callback_data="panel:home", style=ButtonStyle.PRIMARY)])
+    welcome_msg = get_welcome()
+    if not welcome_msg:
+        welcome_msg = (
+            "👋 <b>TeraBox Downloader Bot</b>\n\n"
+            "Bas apna TeraBox / teraShare / 1024Tera share link bhejo.\n"
+            "File yahin download karke bhej di jayegi.\n\n"
+            "⚡ <b>Features:</b>\n"
+            "• Bade files support (2GB+) 📦\n"
+            "• Superfast parallel download & upload 🚀\n"
+            "• Auto channel join 🔒"
+        )
     await message.reply_text(
-        "👋 <b>TeraBox Downloader Bot</b>\n\n"
-        "Bas apna TeraBox / teraShare / 1024Tera share link bhejo.\n"
-        "File yahin download karke bhej di jayegi.\n\n"
-        "⚡ <b>Features:</b>\n"
-        "• Bade files support (2GB+) 📦\n"
-        "• Superfast parallel download & upload 🚀\n"
-        "• Auto channel join 🔒",
+        welcome_msg,
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(kb) if kb else None,
+        disable_web_page_preview=True,
     )
 
 
@@ -656,33 +665,34 @@ def _auto_delete_state() -> str:
 
 def _admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Statistics", callback_data="panel:stats")],
-        [InlineKeyboardButton("📢 Broadcast", callback_data="panel:broadcast")],
-        [InlineKeyboardButton("⏱ Auto-Delete", callback_data="panel:ad")],
+        [InlineKeyboardButton("📊 Statistics", callback_data="panel:stats", style=ButtonStyle.PRIMARY)],
+        [InlineKeyboardButton("📢 Broadcast", callback_data="panel:broadcast", style=ButtonStyle.SUCCESS)],
+        [InlineKeyboardButton("⏱ Auto-Delete", callback_data="panel:ad", style=ButtonStyle.DANGER)],
         [
-            InlineKeyboardButton("🔒 Force Join Set", callback_data="panel:gfsub"),
-            InlineKeyboardButton("🔓 Force Join Remove", callback_data="panel:rfsub"),
+            InlineKeyboardButton("🔒 Force Join Set", callback_data="panel:gfsub", style=ButtonStyle.PRIMARY),
+            InlineKeyboardButton("🔓 Force Join Remove", callback_data="panel:rfsub", style=ButtonStyle.DANGER),
         ],
         [
-            InlineKeyboardButton("🚫 Ban User", callback_data="panel:ban"),
-            InlineKeyboardButton("✅ Unban User", callback_data="panel:unban"),
+            InlineKeyboardButton("🚫 Ban User", callback_data="panel:ban", style=ButtonStyle.DANGER),
+            InlineKeyboardButton("✅ Unban User", callback_data="panel:unban", style=ButtonStyle.SUCCESS),
         ],
-        [InlineKeyboardButton("🗑 Close", callback_data="panel:close")],
+        [InlineKeyboardButton("👋 Set Welcome", callback_data="panel:welcome", style=ButtonStyle.PRIMARY)],
+        [InlineKeyboardButton("🗑 Close", callback_data="panel:close", style=ButtonStyle.DANGER)],
     ])
 
 
 def _ad_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("⏱ 10 min", callback_data="ad:600"),
-            InlineKeyboardButton("⏱ 20 min", callback_data="ad:1200"),
+            InlineKeyboardButton("⏱ 10 min", callback_data="ad:600", style=ButtonStyle.SUCCESS),
+            InlineKeyboardButton("⏱ 20 min", callback_data="ad:1200", style=ButtonStyle.SUCCESS),
         ],
         [
-            InlineKeyboardButton("⏱ 30 min", callback_data="ad:1800"),
-            InlineKeyboardButton("⏱ 60 min", callback_data="ad:3600"),
+            InlineKeyboardButton("⏱ 30 min", callback_data="ad:1800", style=ButtonStyle.SUCCESS),
+            InlineKeyboardButton("⏱ 60 min", callback_data="ad:3600", style=ButtonStyle.SUCCESS),
         ],
-        [InlineKeyboardButton("❌ Auto-Delete OFF", callback_data="ad:0")],
-        [InlineKeyboardButton("🔙 Back", callback_data="panel:home")],
+        [InlineKeyboardButton("❌ Auto-Delete OFF", callback_data="ad:0", style=ButtonStyle.DANGER)],
+        [InlineKeyboardButton("🔙 Back", callback_data="panel:home", style=ButtonStyle.DEFAULT)],
     ])
 
 
@@ -691,6 +701,7 @@ def _admin_text() -> str:
         "👨‍💻 <b>Admin Panel</b>\n\n"
         + _stats_text()
         + f"\n⏱ <b>Auto-Delete:</b> {_auto_delete_state()}"
+        + f"\n👋 <b>Welcome:</b> {'Set ✅' if get_welcome() else 'Default (off)'}"
     )
 
 
@@ -726,6 +737,18 @@ async def _handle_pending(client: Client, message: Message) -> bool:
         return False
     if action == "broadcast":
         await _do_broadcast(client, message)
+    elif action == "welcome":
+        value = (message.text or "").strip()
+        if value:
+            set_welcome(value)
+            await _send_status(
+                client, chat_id,
+                "✅ <b>Welcome message set!</b>\n\n"
+                "Ab jab user /start karega to ye dikhega:\n\n"
+                + value,
+            )
+        else:
+            await _send_status(client, chat_id, "❌ Welcome message khaali nahi ho sakta. /cancel se band karo.")
     elif action == "fsub":
         value = (message.text or "").strip().lstrip("@")
         if value:
@@ -843,7 +866,7 @@ async def on_callback(client: Client, cb: CallbackQuery):
         await cb.message.edit_text(
             _stats_text(), parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data="panel:home")]
+                [InlineKeyboardButton("🔙 Back", callback_data="panel:home", style=ButtonStyle.DEFAULT)]
             ]),
         )
     elif data == "panel:broadcast":
@@ -881,6 +904,30 @@ async def on_callback(client: Client, cb: CallbackQuery):
         )
     elif data == "panel:rfsub":
         clear_fsub()
+        await cb.message.edit_text(
+            _admin_text(), parse_mode=ParseMode.HTML, reply_markup=_admin_keyboard()
+        )
+    elif data == "panel:welcome":
+        cur = get_welcome()
+        display = cur if cur else "(Default message use ho raha hai)"
+        await cb.message.edit_text(
+            f"👋 <b>Welcome Message Settings</b>\n\n"
+            f"Abhi: <b>{'Set ✅' if cur else 'Default'}</b>\n\n"
+            f"<b>Current Welcome:</b>\n{display}\n\n"
+            "Naya welcome message bhejo (HTML formatting support: <b>&lt;b&gt;</b>, <i>&lt;i&gt;</i>, <code>&lt;code&gt;</code>).\n\n"
+            "/cancel se cancel.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Remove Welcome (Default use karo)", callback_data="panel:rwelcome", style=ButtonStyle.DANGER)],
+                [InlineKeyboardButton("🔙 Back", callback_data="panel:home", style=ButtonStyle.DEFAULT)],
+            ]) if cur else InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="panel:home", style=ButtonStyle.DEFAULT)],
+            ]),
+        )
+        _pending[chat_id] = "welcome"
+    elif data == "panel:rwelcome":
+        clear_welcome()
+        await cb.answer("✅ Welcome message remove kar diya! Ab default msg dikhega.", show_alert=True)
         await cb.message.edit_text(
             _admin_text(), parse_mode=ParseMode.HTML, reply_markup=_admin_keyboard()
         )
