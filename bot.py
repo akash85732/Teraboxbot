@@ -922,9 +922,31 @@ def _start_health_server():
         logger.warning("Health server disabled: %s", e)
 
 
+async def _self_ping():
+    port = int(os.environ.get("PORT", "8080"))
+    url = f"http://127.0.0.1:{port}/"
+    await asyncio.sleep(30)
+    while True:
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    logger.info("Self-ping: %s", resp.status)
+        except Exception as e:
+            logger.warning("Self-ping failed: %s", e)
+        await asyncio.sleep(600)
+
+
 def start():
     logger.info("🚀 Starting TeraBox Bot (Pyrogram / MTProto)...")
     threading.Thread(target=_start_health_server, daemon=True).start()
+
+    @app.on_raw_update()
+    async def _kickstart(client):
+        if not hasattr(_kickstart, "_scheduled"):
+            _kickstart._scheduled = True
+            asyncio.ensure_future(_self_ping())
+
     try:
         app.run()
     except KeyboardInterrupt:
