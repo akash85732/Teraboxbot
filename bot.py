@@ -25,7 +25,7 @@ import threading
 import html as html_mod
 from pathlib import PurePath
 
-from pyrogram import Client, filters, raw
+from pyrogram import Client, filters, raw, errors
 from pyrogram.enums import ChatMemberStatus, ParseMode, ButtonStyle
 from pyrogram.session import Session
 from pyrogram.types import (
@@ -120,40 +120,81 @@ def _channel_link(channel: str) -> str:
     return f"https://t.me/{ch}"
 
 
-_FSUB_LINK_RE = re.compile(r"(?:https?://)?t(?:elegram)?\.me/([a-zA-Z0-9_]{5,})")
+_FSUB_LINK_RE = re.compile(r"(?:https?://)?(?:www\.)?t(?:elegram)?\.me/([a-zA-Z0-9_+]{5,})")
 
 
-def _extract_fsub_channel(message: Message) -> tuple[str, str]:
-    """Extract (identifier, title) of a channel from a forwarded channel
-    message or from typed link/username/id text.
-
-    - identifier: @username (public) ya -100... id (private) jo membership
-      check ke liye use hota hai.
-    - title: channel ka display name (dikhane ke liye).
-    """
-    # 1) Forwarded message from a channel
+def _extract_fsub_text(message: Message) -> tuple[str, str]:
+    """(identifier, title) nikaalta hai forwarded channel message se, warna
+    (text, "") return karta hai jise client se resolve karenge."""
+    # 1) Forwarded message from a channel -> use its chat id directly
     fwd = getattr(message, "forward_from_chat", None)
     if fwd is not None:
         uname = getattr(fwd, "username", "") or ""
         cid = getattr(fwd, "id", None)
         title = getattr(fwd, "title", "") or ""
         if uname:
-            return str(uname).lstrip("@"), (title or str(uname))
+            return str(uname).lstrip("@"), title or str(uname)
         if cid:
-            return str(cid), (title or str(cid))
+            return str(cid), title or str(cid)
         return "", ""
-    # 2) Text input: link / @username / numeric id
-    text = (message.text or "").strip()
-    if not text:
-        return "", ""
-    m = _FSUB_LINK_RE.search(text)
+    return (message.text or "").strip(), ""
+
+
+async def _resolve_fsub_channel(client: Client, raw: str, fallback_title: str = "") -> tuple[str, str, str]:
+    """Resolve koi bhi channel input (link / @username / numeric id / invite link)
+    ko (identifier, title, invite_link) mein.
+
+    identifier hamesha -100... id ya @username hota hai jo membership check
+    ke liye use hota hai.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return "", "", ""
+
+    # Private invite link: https://t.me/+AbCd123 ya https://t.me/joinchat/AbCd
+    plus = re.search(
+        r"(?:https?://)?(?:www\.)?t(?:elegram)?\.me/(?:\+|joinchat/)([A-Za-z0-9_-]+)",
+        raw,
+    )
+    if plus:
+        invite_link = f"https://t.me/+{plus.group(1)}"
+        try:
+            invite = await client.check_chat_invite_link(plus.group(1))
+            chat = getattr(invite, "chat") or invite
+            cid = str(getattr(chat, "id", ""))
+            title = getattr(chat, "title", "") or cid
+            return cid, title, invite_link
+        except Exception:
+            pass
+
+    try:
+        chat = await client.get_chat(raw)
+        cid = str(getattr(chat, "id", ""))
+        title = getattr(chat, "title", "") or getattr(chat, "username", "") or cid
+        # id hamesha -100 prefix wala integer hone ke liye force karo
+        if cid.startswith("-100") and cid[4:].isdigit():
+            identifier = cid
+        else:
+            uname = getattr(chat, "username", "") or ""
+            identifier = f"@{uname}" if uname else cid
+        return identifier, title or fallback_title, ""
+    except Exception:
+        pass
+
+    # Direct get_chat fail hua -> raw value ko hi use karo,
+    # lekin invite-link hashes (+... / joinchat/...) koi valid identifier nahi
+    # hain, wo client se resolve hone par hi kaam karte hain.
+    if "+" in raw or "joinchat" in raw:
+        return "", "", ""
+    m = _FSUB_LINK_RE.search(raw)
     if m:
-        return m.group(1), m.group(1)
-    t = text.replace("https://", "").replace("http://", "")
-    t = t.split("/")[0].lstrip("@")
+        return m.group(1), m.group(1), ""
+    # numeric id
+    t = raw.replace("https://", "").replace("http://", "")
+    t = t.split("/")[0].lstrip("@").strip()
     if t and (t.isdigit() or t.lstrip("-").isdigit() or t.startswith("@")):
-        return t.lstrip("+").replace("t.me/", ""), t
-    return t, t
+        return t.lstrip("+"), t or fallback_title, ""
+    return raw, fallback_title or raw, ""
 
 
 def _fmt_uptime(started: float) -> str:
@@ -1003,10 +1044,10 @@ async def _handle_pending(client: Client, message: Message) -> bool:
         else:
             await _send_status(client, chat_id, "❌ Welcome DM khaali nahi ho sakta. /cancel se band karo.")
     elif action == "fsub":
-        value, title = _extract_fsub_channel(message)
+        raw, fwd_title = _extract_fsub_text(message)
+        value, title, invite = await _resolve_fsub_channel(client, raw, fwd_title)
         if value:
-            invite = ""
-            if value.startswith("-100"):
+            if value.startswith("-100") and not invite:
                 try:
                     invite = await client.export_chat_invite_link(value)
                 except Exception:
@@ -1160,6 +1201,13 @@ async def _fsub_check(client: Client, cb: CallbackQuery):
 
 @app.on_callback_query()
 async def on_callback(client: Client, cb: CallbackQuery):
+    try:
+        await _handle_callback(client, cb)
+    except errors.QueryIdInvalid:
+        logger.debug("Callback query expired (worker was busy), ignoring")
+
+
+async def _handle_callback(client: Client, cb: CallbackQuery):
     data = cb.data or ""
     if not cb.message:
         return
@@ -1372,7 +1420,7 @@ def start():
     threading.Thread(target=_start_health_server, daemon=True).start()
 
     @app.on_raw_update()
-    async def _kickstart(client):
+    async def _kickstart(client, update, users, chats):
         if not hasattr(_kickstart, "_scheduled"):
             _kickstart._scheduled = True
             asyncio.ensure_future(_self_ping())
