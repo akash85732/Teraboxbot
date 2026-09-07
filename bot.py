@@ -39,6 +39,7 @@ from pyrogram.types import (
 from config import Config
 from downloader import downloader, DownloadError, _cleanup_file
 from db import (
+    add_fsub,
     all_users,
     ban_user,
     clear_fsub,
@@ -46,9 +47,7 @@ from db import (
     clear_welcome_dm,
     export_db,
     get_auto_delete,
-    get_fsub,
-    get_fsub_link,
-    get_fsub_title,
+    get_fsubs,
     get_stats,
     get_welcome,
     get_welcome_dm,
@@ -56,8 +55,8 @@ from db import (
     inc_download,
     is_banned,
     recent_users,
+    remove_fsub,
     set_auto_delete,
-    set_fsub,
     set_welcome,
     set_welcome_dm,
     track_user,
@@ -317,21 +316,57 @@ async def _check_member(client: Client, channel: str, user_id: int):
         return None
 
 
-async def _send_fsub_prompt(client: Client, chat_id: int, user_id: int, fsub: str):
+def _fsub_channels() -> list:
+    """Config fallback ke saath saare force-join channels ki list."""
+    fsubs = get_fsubs()
+    if fsubs:
+        return fsubs
+    cfg = getattr(Config, "FSUB_CHANNEL", "") or ""
+    if cfg:
+        return [{"id": str(cfg).lstrip("@"), "title": str(cfg), "link": ""}]
+    return []
+
+
+async def _check_all_member(client: Client, channels: list, user_id: int) -> bool:
+    """Har channel ka membership check. True sirf tab jab user har channel ka
+    member ho."""
+    if not channels:
+        return True
+    checked = 0
+    for ch in channels:
+        ident = ch.get("id") or ""
+        status = await _check_member(client, ident, user_id)
+        if status is not True:
+            return False
+        checked += 1
+    return checked > 0
+
+
+async def _send_fsub_prompt(client: Client, chat_id: int, user_id: int, channels: list):
     """Send the force-subscribe join prompt with Join + Check buttons."""
-    title = get_fsub_title() or fsub.lstrip("@")
-    link = get_fsub_link() or _channel_link(fsub)
+    if not channels:
+        return
+    lines = ["🔒 <b>Bot use karne se pehle ye channels join karo:</b>\n"]
+    buttons = []
+    for i, ch in enumerate(channels, 1):
+        ident = ch.get("id") or ""
+        title = ch.get("title") or ident.lstrip("@") or f"Channel {i}"
+        link = ch.get("link") or _channel_link(ident)
+        lines.append(f"{i}. 👉 <b>{safe_html(title)}</b>")
+        buttons.append([
+            InlineKeyboardButton(
+                f"📢 Join {safe_html(title)[:40]}", url=link, style=ButtonStyle.PRIMARY
+            )
+        ])
+    buttons.append([
+        InlineKeyboardButton("✅ Check Karo", callback_data=f"fsubc:{user_id}", style=ButtonStyle.SUCCESS)
+    ])
     try:
         await client.send_message(
             chat_id,
-            f"🔒 <b>Channel Join Karo</b>\n\n"
-            f"Bot use karne se pehle hamara channel join karna hoga:\n"
-            f"👉 <b>{safe_html(title)}</b>",
+            "\n".join(lines),
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📢 Join Channel", url=link, style=ButtonStyle.PRIMARY),
-                InlineKeyboardButton("✅ Check Karo", callback_data=f"fsubc:{user_id}", style=ButtonStyle.SUCCESS),
-            ]]),
+            reply_markup=InlineKeyboardMarkup(buttons),
         )
     except Exception:
         pass
@@ -362,11 +397,11 @@ async def handle_link(client: Client, message: Message, link: str):
     if is_banned(user_id):
         return
 
-    fsub = get_fsub() or Config.FSUB_CHANNEL
-    if fsub and not is_owner(user_id):
-        member = await _check_member(client, fsub, user_id)
-        if member is not True:
-            await _send_fsub_prompt(client, chat_id, user_id, fsub)
+    fsubs = _fsub_channels()
+    if fsubs and not is_owner(user_id):
+        ok = await _check_all_member(client, fsubs, user_id)
+        if not ok:
+            await _send_fsub_prompt(client, chat_id, user_id, fsubs)
             return
 
     if not _can_use(user_id):
@@ -775,11 +810,11 @@ async def start_cmd(client: Client, message: Message):
         track_user(message.from_user)
     chat_id = message.chat.id
     user_id = message.from_user.id if message.from_user else 0
-    fsub = get_fsub() or Config.FSUB_CHANNEL
-    if fsub and not is_owner(user_id):
-        member = await _check_member(client, fsub, user_id)
-        if member is not True:
-            await _send_fsub_prompt(client, chat_id, user_id, fsub)
+    fsubs = _fsub_channels()
+    if fsubs and not is_owner(user_id):
+        ok = await _check_all_member(client, fsubs, user_id)
+        if not ok:
+            await _send_fsub_prompt(client, chat_id, user_id, fsubs)
             return
     await message.reply_text(
         _start_text(),
@@ -819,7 +854,9 @@ async def _send_db_backup(client: Client, chat_id: int):
         tmp_path = os.path.join(Config.DOWNLOAD_DIR, "bot_db_backup.json")
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
-        name = get_fsub_title() or data.get("fsub") or "—"
+        name = data.get("fsub") or "—"
+        if data.get("fsubs"):
+            name = ", ".join(str(c.get("title") or c.get("id") or "?") for c in data["fsubs"])
         try:
             await client.send_document(
                 chat_id,
@@ -961,6 +998,45 @@ def _admin_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def _fsub_panel_text() -> str:
+    fsubs = _fsub_channels()
+    if not fsubs:
+        return (
+            "📢 <b>Force Join Channels</b>\n\n"
+            "Koi channel abhi set nahi hai.\n\n"
+            "⬇️ Neeche <b>➕ Add Channel</b> dabao aur channel forward karo / "
+            "link / @username koi ek bhejo."
+        )
+    lines = [f"📢 <b>Force Join Channels ({len(fsubs)})</b>\n"]
+    for i, ch in enumerate(fsubs, 1):
+        ident = ch.get("id") or ""
+        title = ch.get("title") or ident.lstrip("@") or f"Channel {i}"
+        url = ch.get("link") or _channel_link(ident)
+        lines.append(f"{i}. <b>{safe_html(title)}</b>\n   🔗 <code>{safe_html(url)}</code>")
+    lines.append(
+        "\n⬇️ Naya channel add karne ke liye <b>➕ Add Channel</b> dabao."
+        "\nRemove karne ke liye uske saaath wala ❌ dabao."
+    )
+    return "\n".join(lines)
+
+
+def _fsub_panel_keyboard() -> InlineKeyboardMarkup:
+    fsubs = _fsub_channels()
+    buttons = [[InlineKeyboardButton("➕ Add Channel", callback_data="fsub:add", style=ButtonStyle.PRIMARY)]]
+    for i, ch in enumerate(fsubs, 1):
+        ident = ch.get("id") or ""
+        title = ch.get("title") or ident.lstrip("@") or f"Channel {i}"
+        buttons.append([
+            InlineKeyboardButton(
+                f"❌ {safe_html(title)[:35]}",
+                callback_data=f"fsub:rm:{i - 1}",
+                style=ButtonStyle.DANGER,
+            )
+        ])
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="panel:home", style=ButtonStyle.DEFAULT)])
+    return InlineKeyboardMarkup(buttons)
+
+
 def _ad_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
@@ -988,8 +1064,14 @@ def _admin_text() -> str:
 
 def _stats_text() -> str:
     s = get_stats()
-    fsub = get_fsub() or Config.FSUB_CHANNEL
-    fsub_title = get_fsub_title() or fsub
+    fsubs = _fsub_channels()
+    if fsubs:
+        fj_names = ", ".join(
+            f"<code>{safe_html(c.get('title') or c.get('id') or '?')}</code>"
+            for c in fsubs
+        )
+    else:
+        fj_names = "Koi nahi"
     lines = []
     for uid, info in recent_users(10):
         name = safe_html(info.get("name") or str(uid))
@@ -1007,7 +1089,7 @@ def _stats_text() -> str:
         f"💾 <b>Data Served:</b> {format_size(s['bytes'])}\n"
         f"🚫 <b>Banned:</b> {s['banned']}\n"
         f"⏱ <b>Uptime:</b> {_fmt_uptime(s['started'])}\n"
-        f"🔒 <b>Force Join:</b> <code>{safe_html(fsub_title)}</code>\n\n"
+        f"🔒 <b>Force Join ({len(fsubs)}):</b> {fj_names}\n\n"
         f"👤 <b>Recent Users:</b>\n{recent}"
     )
 
@@ -1052,13 +1134,22 @@ async def _handle_pending(client: Client, message: Message) -> bool:
                     invite = await client.export_chat_invite_link(value)
                 except Exception:
                     invite = ""
-            set_fsub(value, title=title or value, link=invite)
-            await _send_status(
-                client, chat_id,
-                f"✅ Force join channel set:\n"
-                f"📢 <b>{safe_html(title or value)}</b>\n\n"
-                f"Ab users ko channel join karna zaroori hoga.",
-            )
+            added = add_fsub(value, title=title or value, link=invite)
+            total = len(_fsub_channels())
+            if added:
+                await _send_status(
+                    client, chat_id,
+                    f"✅ Force join channel <b>add</b> ho gaya:\n"
+                    f"📢 <b>{safe_html(title or value)}</b>\n\n"
+                    f"Ab total <b>{total}</b> channel(s) set hain. "
+                    f"Users ko sab join karna hoga.",
+                )
+            else:
+                await _send_status(
+                    client, chat_id,
+                    f"ℹ️ Ye channel pehle se set hai.\n"
+                    f"Ab total <b>{total}</b> channel(s) set hain.",
+                )
         else:
             await _send_status(
                 client, chat_id,
@@ -1187,16 +1278,26 @@ async def _fsub_check(client: Client, cb: CallbackQuery):
         target = int(cb.data.split(":", 1)[1])
     except Exception:
         return
-    fsub = get_fsub() or Config.FSUB_CHANNEL
-    status = await _check_member(client, fsub, target) if fsub else None
-    if status is True:
+    fsubs = _fsub_channels()
+    member_all = await _check_all_member(client, fsubs, target)
+    if member_all:
         await cb.message.edit_text(
             "✅ <b>Join ho gaya!</b>\n\nAb apna TeraBox link bhejo.",
             parse_mode=ParseMode.HTML,
         )
         await _send_welcome_dm(client, target)
     else:
-        await cb.answer("❌ Pehle channel join karo ya membership check nahi ho paya!", show_alert=True)
+        missing = []
+        for ch in fsubs:
+            ident = ch.get("id") or ""
+            status = await _check_member(client, ident, target)
+            if status is not True:
+                missing.append(safe_html(ch.get("title") or ident.lstrip("@") or ident))
+        hint = ", ".join(missing) if missing else "channel"
+        await cb.answer(
+            f"❌ Abhi bhi inme join nahi ho: {hint}. Pehle sab join karo!",
+            show_alert=True,
+        )
 
 
 @app.on_callback_query()
@@ -1294,14 +1395,36 @@ async def _handle_callback(client: Client, cb: CallbackQuery):
             reply_markup=_ad_keyboard(),
         )
     elif data == "panel:gfsub":
+        _pending.pop(chat_id, None)
+        await cb.message.edit_text(
+            _fsub_panel_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_fsub_panel_keyboard(),
+        )
+    elif data == "fsub:add":
         _pending[chat_id] = "fsub"
         await cb.message.edit_text(
-            "📢 <b>Force Join Channel Set</b>\n\n"
+            "📢 <b>Naya Channel Add Karo</b>\n\n"
             "Koi bhi ek bhejo:\n"
             "• Channel ka koi bhi msg <b>forward</b> karo (bot khud link bana lega)\n"
             "• Channel ka link — https://t.me/xyz\n"
-            "• @username ya <code>-100...</code> id\n\n/cancel se cancel.",
+            "• Private channel ka invite link — https://t.me/+AbC...\n"
+            "• @username ya <code>-100...</code> id\n\n"
+            "/cancel se cancel kar sakte ho.",
             parse_mode=ParseMode.HTML,
+        )
+    elif data.startswith("fsub:rm:"):
+        try:
+            idx = int(data.split(":", 2)[2])
+        except Exception:
+            idx = -1
+        fsubs = get_fsubs()
+        if 0 <= idx < len(fsubs):
+            remove_fsub(fsubs[idx].get("id") or fsubs[idx].get("title") or "")
+        await cb.message.edit_text(
+            _fsub_panel_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_fsub_panel_keyboard(),
         )
     elif data == "panel:rfsub":
         clear_fsub()

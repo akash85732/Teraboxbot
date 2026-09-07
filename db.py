@@ -27,6 +27,16 @@ def _ensure():
     _data.setdefault("fsub", "")
     _data.setdefault("fsub_title", "")
     _data.setdefault("fsub_link", "")
+    _data.setdefault("fsubs", [])
+    # purane single-channel format ko naye list format me migrate karo
+    if not _data["fsubs"] and (_data.get("fsub") or ""):
+        _data["fsubs"] = [
+            {
+                "id": str(_data.get("fsub") or ""),
+                "title": str(_data.get("fsub_title") or ""),
+                "link": str(_data.get("fsub_link") or ""),
+            }
+        ]
     _data.setdefault("auto_delete", None)
     _data.setdefault("welcome", "")
     _data.setdefault("welcome_dm", "")
@@ -107,31 +117,88 @@ def unban_user(user_id: int) -> bool:
     return True
 
 
+def get_fsubs() -> list:
+    """Saare force-join channels ki list: [{"id", "title", "link"}, ...]"""
+    _ensure()
+    return [
+        {
+            "id": str(c.get("id") or ""),
+            "title": str(c.get("title") or ""),
+            "link": str(c.get("link") or ""),
+        }
+        for c in _data.get("fsubs") or []
+        if c.get("id")
+    ]
+
+
 def get_fsub() -> str:
     _ensure()
+    fsubs = _data.get("fsubs") or []
+    if fsubs:
+        return str(fsubs[0].get("id") or "")
     return str(_data.get("fsub") or "")
 
 
-def set_fsub(channel: str, title: str = "", link: str = "") -> None:
+def add_fsub(channel: str, title: str = "", link: str = "") -> bool:
+    """Ek channel force-join list me add karo (duplicate skip)."""
     _ensure()
-    _data["fsub"] = (channel or "").strip().lstrip("@")
-    _data["fsub_title"] = (title or "").strip()
-    _data["fsub_link"] = (link or "").strip()
+    channel = (channel or "").strip().lstrip("@")
+    if not channel:
+        return False
+    fsubs = _data.setdefault("fsubs", [])
+    for c in fsubs:
+        if str(c.get("id") or "").lstrip("@") == channel:
+            return False
+    fsubs.append(
+        {
+            "id": channel,
+            "title": (title or "").strip(),
+            "link": (link or "").strip(),
+        }
+    )
     _save()
+    return True
+
+
+def remove_fsub(channel: str) -> bool:
+    """Force-join list se channel remove karo."""
+    _ensure()
+    channel = (channel or "").strip().lstrip("@")
+    if not channel:
+        return False
+    fsubs = _data.setdefault("fsubs", [])
+    kept = [c for c in fsubs if str(c.get("id") or "").lstrip("@") != channel]
+    changed = len(kept) != len(fsubs)
+    _data["fsubs"] = kept
+    if changed:
+        _save()
+    return changed
+
+
+def set_fsub(channel: str, title: str = "", link: str = "") -> None:
+    """Backward-compat: add_fsub ki tarah hi kaam karta hai (overwrite nahi)."""
+    add_fsub(channel, title, link)
 
 
 def get_fsub_title() -> str:
     _ensure()
+    fsubs = _data.get("fsubs") or []
+    if fsubs:
+        return str(fsubs[0].get("title") or "")
     return str(_data.get("fsub_title") or "")
 
 
 def get_fsub_link() -> str:
     _ensure()
+    fsubs = _data.get("fsubs") or []
+    if fsubs:
+        return str(fsubs[0].get("link") or "")
     return str(_data.get("fsub_link") or "")
 
 
 def clear_fsub() -> None:
     _ensure()
+    _data["fsubs"] = []
     _data["fsub"] = ""
     _data["fsub_title"] = ""
     _data["fsub_link"] = ""
@@ -248,11 +315,30 @@ def import_db(raw: dict, overwrite: bool = True) -> tuple[int, int, str]:
         "fsub": str(raw.get("fsub") or ""),
         "fsub_title": str(raw.get("fsub_title") or ""),
         "fsub_link": str(raw.get("fsub_link") or ""),
+        "fsubs": [
+            {
+                "id": str(c.get("id") or ""),
+                "title": str(c.get("title") or ""),
+                "link": str(c.get("link") or ""),
+            }
+            for c in (raw.get("fsubs") or [])
+            if isinstance(c, dict) and c.get("id")
+        ],
         "auto_delete": raw.get("auto_delete"),
         "welcome": str(raw.get("welcome") or ""),
         "welcome_dm": str(raw.get("welcome_dm") or ""),
         "stats": raw.get("stats") if isinstance(raw.get("stats"), dict) else {},
     }
+
+    # purane single-channel format se fsubs list banao agar list khaali ho
+    if not incoming["fsubs"] and incoming["fsub"]:
+        incoming["fsubs"] = [
+            {
+                "id": incoming["fsub"],
+                "title": incoming["fsub_title"],
+                "link": incoming["fsub_link"],
+            }
+        ]
 
     with _lock:
         old = json.loads(json.dumps(_data)) if _data is not None else {}
@@ -260,12 +346,22 @@ def import_db(raw: dict, overwrite: bool = True) -> tuple[int, int, str]:
             _data = incoming
         else:
             # merge: keep existing keys, add/overwrite incoming ones
+            old_fsubs = {
+                str(c.get("id") or "").lstrip("@")
+                for c in (old.get("fsubs") or [])
+                if c.get("id")
+            }
+            merged_fsubs = [c for c in old.get("fsubs") or [] if c.get("id")]
+            for c in incoming["fsubs"]:
+                if str(c["id"]).lstrip("@") not in old_fsubs:
+                    merged_fsubs.append(c)
             merged = {
                 "users": {**old.get("users", {}), **incoming["users"]},
                 "banned": list(dict.fromkeys(old.get("banned", []) + incoming["banned"])),
                 "fsub": incoming["fsub"] or (old.get("fsub") or ""),
                 "fsub_title": incoming["fsub_title"] or (old.get("fsub_title") or ""),
                 "fsub_link": incoming["fsub_link"] or (old.get("fsub_link") or ""),
+                "fsubs": merged_fsubs or incoming["fsubs"],
                 "auto_delete": incoming["auto_delete"]
                 if incoming["auto_delete"] is not None
                 else (old.get("auto_delete") or None),
@@ -277,8 +373,9 @@ def import_db(raw: dict, overwrite: bool = True) -> tuple[int, int, str]:
 
     _save()
 
+    fsubs = _data.get("fsubs") or []
     return (
         len(_data["users"]),
         len(_data["banned"]),
-        _data.get("fsub") or "",
+        str(fsubs[0].get("id") or "") if fsubs else "",
     )
