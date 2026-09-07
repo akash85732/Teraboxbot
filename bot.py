@@ -923,8 +923,10 @@ def _start_health_server():
 
 
 async def _self_ping():
-    port = int(os.environ.get("PORT", "8080"))
-    url = f"http://127.0.0.1:{port}/"
+    url = (
+        os.environ.get("RENDER_EXTERNAL_URL")
+        or f"http://127.0.0.1:{int(os.environ.get('PORT', '8080'))}/"
+    )
     await asyncio.sleep(30)
     while True:
         try:
