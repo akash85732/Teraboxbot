@@ -580,28 +580,90 @@ app = FastUploadClient(
 )
 
 
-@app.on_message(filters.command(["start", "help"]) & filters.private)
+def _start_text() -> str:
+    welcome = get_welcome()
+    if welcome:
+        return welcome
+    return (
+        "👋 <b>TeraBox Downloader Bot</b>\n\n"
+        "Bas apna TeraBox / teraShare / 1024Tera share link bhejo.\n"
+        "File yahin download karke bhej di jayegi."
+    )
+
+
+def _start_keyboard(from_user) -> list:
+    kb = [
+        [
+            InlineKeyboardButton("📖 Help", callback_data="start:help", style=ButtonStyle.PRIMARY),
+            InlineKeyboardButton("📥 Download Video", callback_data="start:download", style=ButtonStyle.SUCCESS),
+        ],
+    ]
+    if from_user and is_owner(from_user.id):
+        kb.append([InlineKeyboardButton("🔧 Admin Panel", callback_data="panel:home", style=ButtonStyle.PRIMARY)])
+    return kb
+
+
+def _help_text() -> str:
+    return (
+        "📖 <b>Bot Help</b>\n\n"
+        "Ye bot TeraBox share links se video/files download karke yahin bhej deta hai.\n\n"
+        "<b>Kaise use kare:</b>\n"
+        "1. TeraBox app me se apni file ka share link copy karo\n"
+        "2. Link is chat me paste karke bhej do\n"
+        "3. Bot file download karke bhej dega\n\n"
+        "<b>Commands:</b>\n"
+        "/start - Bot start\n"
+        "/help - Yeh madad message\n"
+        "/cancel - Chalu download/action cancel\n"
+        "/admin - Admin panel (sirf owner)\n\n"
+        "<b>Note:</b> Bheji gayi file auto-delete hoti hai, isliye turant forward karke save kar lo."
+    )
+
+
+def _help_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Back", callback_data="start:home", style=ButtonStyle.DEFAULT)],
+    ])
+
+
+def _download_text() -> str:
+    return (
+        "📥 <b>Video Download Kaise Kare</b>\n\n"
+        "1. TeraBox app/website kholo\n"
+        "2. Jis video ko download karna hai uspe tap karke 'Share' karo\n"
+        "3. 'Copy Link' select karo\n"
+        "4. Link yahin chat me paste karke bhej do\n\n"
+        "Bot link check karke file download karega aur yahin bhej dega.\n\n"
+        "<b>Note:</b> Bade videos me kuch time lag sakta hai. File auto-delete hoti hai, isliye turant forward karke save kar lo."
+    )
+
+
+def _download_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Back", callback_data="start:home", style=ButtonStyle.DEFAULT)],
+    ])
+
+
+@app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
     if message.from_user:
         track_user(message.from_user)
-    kb = []
-    if message.from_user and is_owner(message.from_user.id):
-        kb.append([InlineKeyboardButton("🔧 Admin Panel", callback_data="panel:home", style=ButtonStyle.PRIMARY)])
-    welcome_msg = get_welcome()
-    if not welcome_msg:
-        welcome_msg = (
-            "👋 <b>TeraBox Downloader Bot</b>\n\n"
-            "Bas apna TeraBox / teraShare / 1024Tera share link bhejo.\n"
-            "File yahin download karke bhej di jayegi.\n\n"
-            "⚡ <b>Features:</b>\n"
-            "• Bade files support (2GB+) 📦\n"
-            "• Superfast parallel download & upload 🚀\n"
-            "• Auto channel join 🔒"
-        )
     await message.reply_text(
-        welcome_msg,
+        _start_text(),
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(kb) if kb else None,
+        reply_markup=InlineKeyboardMarkup(_start_keyboard(message.from_user)),
+        disable_web_page_preview=True,
+    )
+
+
+@app.on_message(filters.command("help") & filters.private)
+async def help_cmd(client: Client, message: Message):
+    if message.from_user:
+        track_user(message.from_user)
+    await message.reply_text(
+        _help_text(),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_help_keyboard(),
         disable_web_page_preview=True,
     )
 
@@ -853,6 +915,33 @@ async def on_callback(client: Client, cb: CallbackQuery):
             await _fsub_check(client, cb)
         else:
             await cb.answer("Yeh check aap apne chat me kar sakte ho.")
+        return
+    if data == "start:home":
+        await cb.message.edit_text(
+            _start_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(_start_keyboard(cb.from_user)),
+            disable_web_page_preview=True,
+        )
+        await cb.answer()
+        return
+    if data == "start:help":
+        await cb.message.edit_text(
+            _help_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_help_keyboard(),
+            disable_web_page_preview=True,
+        )
+        await cb.answer()
+        return
+    if data == "start:download":
+        await cb.message.edit_text(
+            _download_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_download_keyboard(),
+            disable_web_page_preview=True,
+        )
+        await cb.answer()
         return
     if not (cb.from_user and is_owner(cb.from_user.id)):
         await cb.answer("Access Denied ❌", show_alert=True)
