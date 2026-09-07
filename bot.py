@@ -43,11 +43,13 @@ from db import (
     ban_user,
     clear_fsub,
     clear_welcome,
+    clear_welcome_dm,
     export_db,
     get_auto_delete,
     get_fsub,
     get_stats,
     get_welcome,
+    get_welcome_dm,
     import_db,
     inc_download,
     is_banned,
@@ -55,6 +57,7 @@ from db import (
     set_auto_delete,
     set_fsub,
     set_welcome,
+    set_welcome_dm,
     track_user,
     unban_user,
 )
@@ -87,6 +90,7 @@ rate_limited: dict[int, float] = {}
 _pending: dict[int, str] = {}
 _cancel_req: dict[int, bool] = {}
 _db_import: dict[int, dict] = {}
+_broadcast_state: dict[int, dict] = {}
 
 
 class DownloadCancelled(Exception):
@@ -112,6 +116,32 @@ def _channel_link(channel: str) -> str:
     if ch.startswith("-100") and ch[4:].isdigit():
         return f"https://t.me/c/{ch[4:]}"
     return f"https://t.me/{ch}"
+
+
+_FSUB_LINK_RE = re.compile(r"(?:https?://)?t(?:elegram)?\.me/([a-zA-Z0-9_]{5,})")
+
+
+def _extract_fsub_channel(message: Message) -> str:
+    """Extract a channel (@username / link / -100...id) from a forwarded
+    channel message or from typed link/username/id text."""
+    # 1) Forwarded message from a channel
+    fwd = getattr(message, "forward_from_chat", None)
+    if fwd is not None:
+        ch = getattr(fwd, "username", None) or getattr(fwd, "id", None)
+        if ch:
+            return str(ch).lstrip("@")
+    # 2) Text input: link / @username / numeric id
+    text = (message.text or "").strip()
+    if not text:
+        return ""
+    m = _FSUB_LINK_RE.search(text)
+    if m:
+        return m.group(1)
+    t = text.replace("https://", "").replace("http://", "")
+    t = t.split("/")[0].lstrip("@")
+    if t and (t.isdigit() or t.lstrip("-").isdigit() or t.startswith("@")):
+        return t.lstrip("+").replace("t.me/", "")
+    return t
 
 
 def _fmt_uptime(started: float) -> str:
@@ -247,6 +277,22 @@ async def _send_fsub_prompt(client: Client, chat_id: int, user_id: int, fsub: st
                 InlineKeyboardButton("📢 Join Channel", url=_channel_link(fsub), style=ButtonStyle.PRIMARY),
                 InlineKeyboardButton("✅ Check Karo", callback_data=f"fsubc:{user_id}", style=ButtonStyle.SUCCESS),
             ]]),
+        )
+    except Exception:
+        pass
+
+
+async def _send_welcome_dm(client: Client, user_id: int):
+    """Force-join ke baad custom welcome DM bhejo (agar set hai)."""
+    dm = get_welcome_dm()
+    if not dm:
+        return
+    try:
+        await client.send_message(
+            user_id,
+            dm,
+            parse_mode=ParseMode.HTML,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
     except Exception:
         pass
@@ -843,7 +889,8 @@ def _admin_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🚫 Ban User", callback_data="panel:ban", style=ButtonStyle.DANGER),
             InlineKeyboardButton("✅ Unban User", callback_data="panel:unban", style=ButtonStyle.SUCCESS),
         ],
-        [InlineKeyboardButton("👋 Set Welcome", callback_data="panel:welcome", style=ButtonStyle.PRIMARY)],
+        [InlineKeyboardButton("👋 Welcome Msg", callback_data="panel:welcome", style=ButtonStyle.PRIMARY)],
+        [InlineKeyboardButton("👋 Welcome DM (FJ)", callback_data="panel:welcomedm", style=ButtonStyle.PRIMARY)],
         [InlineKeyboardButton("🗄 Database Backup", callback_data="panel:db", style=ButtonStyle.PRIMARY)],
         [InlineKeyboardButton("🗑 Close", callback_data="panel:close", style=ButtonStyle.DANGER)],
     ])
@@ -870,6 +917,7 @@ def _admin_text() -> str:
         + _stats_text()
         + f"\n⏱ <b>Auto-Delete:</b> {_auto_delete_state()}"
         + f"\n👋 <b>Welcome:</b> {'Set ✅' if get_welcome() else 'Default (off)'}"
+        + f"\n👋 <b>Welcome DM:</b> {'Set ✅' if get_welcome_dm() else 'Off'}"
     )
 
 
@@ -917,16 +965,35 @@ async def _handle_pending(client: Client, message: Message) -> bool:
             )
         else:
             await _send_status(client, chat_id, "❌ Welcome message khaali nahi ho sakta. /cancel se band karo.")
+    elif action == "welcomedm":
+        value = (message.text or "").strip()
+        if value:
+            set_welcome_dm(value)
+            await _send_status(
+                client, chat_id,
+                "✅ <b>Welcome DM set!</b>\n\n"
+                "Force join ke baad user ko ye DM jayega:\n\n"
+                + value,
+            )
+        else:
+            await _send_status(client, chat_id, "❌ Welcome DM khaali nahi ho sakta. /cancel se band karo.")
     elif action == "fsub":
-        value = (message.text or "").strip().lstrip("@")
+        value = _extract_fsub_channel(message)
         if value:
             set_fsub(value)
             await _send_status(
                 client, chat_id,
-                f"✅ Force join channel set: <code>{safe_html(value)}</code>",
+                f"✅ Force join channel set: <code>{safe_html(value)}</code>\n\n"
+                f"Ab users ko channel join karna zaroori hoga.",
             )
         else:
-            await _send_status(client, chat_id, "❌ Channel value invalid hai.")
+            await _send_status(
+                client, chat_id,
+                "❌ Channel nahi mila. Koi bhi inme se bhejo:\n"
+                "• Channel ka koi msg <b>forward</b> karo\n"
+                "• Channel ka link — https://t.me/xyz\n"
+                "• @username ya -100...id",
+            )
     elif action == "ban":
         await _ban_by_input(client, message, ban=True)
     elif action == "unban":
@@ -940,31 +1007,83 @@ async def _do_broadcast(client: Client, message: Message):
     if not targets:
         await _send_status(client, chat_id, "❌ Broadcast ke liye koi user registered nahi hai.")
         return
+
+    media_type = "Text"
+    if message.photo:
+        media_type = "🖼 Photo"
+    elif message.video:
+        media_type = "🎬 Video"
+    elif message.document:
+        media_type = f"📄 {safe_html((message.document.file_name or ''))[:25]}"
+    elif message.audio:
+        media_type = "🎵 Audio"
+    elif message.voice:
+        media_type = "🎤 Voice"
+    elif message.animation:
+        media_type = "🔄 GIF"
+    elif message.forward_from_chat or message.forward_from:
+        media_type = "🔁 Forwarded"
+
     info = await message.reply_text(
-        f"📢 <b>Broadcast Chalu...</b>\n👥 Total: {len(targets)}\n✅ Done: 0\n❌ Fail: 0",
+        f"📢 <b>Broadcast Chalu...</b>\n\n"
+        f"📦 Type: {media_type}\n"
+        f"👥 Total: {len(targets)}\n"
+        f"✅ Done: 0\n"
+        f"❌ Fail: 0",
         parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("⏹ Cancel", callback_data="bc:cancel", style=ButtonStyle.DANGER)
+        ]]),
     )
+    _bc_run = {"cancel": False}
+    _broadcast_state[chat_id] = _bc_run
+    _bc_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("⏹ Cancel", callback_data="bc:cancel", style=ButtonStyle.DANGER)
+    ]])
+
     ok = fail = 0
-    for uid in targets:
+    last_edit = 0.0
+    for i, uid in enumerate(targets, 1):
+        if _bc_run["cancel"]:
+            break
         try:
             await message.copy(uid)
             ok += 1
         except Exception:
             fail += 1
-        try:
-            await info.edit_text(
-                f"📢 <b>Broadcast Chalu...</b>\n👥 Total: {len(targets)}\n✅ Done: {ok}\n❌ Fail: {fail}",
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception:
-            pass
+        now = time.time()
+        if now - last_edit >= 1.5 or i == len(targets):
+            last_edit = now
+            try:
+                await info.edit_text(
+                    f"📢 <b>Broadcast Chalu...</b>\n\n"
+                    f"📦 Type: {media_type}\n"
+                    f"👥 Total: {len(targets)}\n"
+                    f"✅ Done: {ok}\n"
+                    f"❌ Fail: {fail}",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_bc_kb,
+                )
+            except Exception:
+                pass
     try:
         await info.edit_text(
-            f"📢 <b>Broadcast Complete!</b>\n👥 Total: {len(targets)}\n✅ Delivered: {ok}\n❌ Failed: {fail}",
+            f"{'⏹️ <b>Broadcast Cancelled!</b>' if _bc_run['cancel'] else '✅ <b>Broadcast Complete!</b>'}\n\n"
+            f"📦 Type: {media_type}\n"
+            f"👥 Total: {len(targets)}\n"
+            f"✅ Delivered: {ok}\n"
+            f"❌ Failed: {fail}",
             parse_mode=ParseMode.HTML,
         )
     except Exception:
         pass
+    await asyncio.sleep(3)
+    try:
+        await info.delete()
+    except Exception:
+        pass
+    if chat_id in _broadcast_state:
+        _broadcast_state.pop(chat_id, None)
 
 
 async def _ban_by_input(client: Client, message: Message, ban: bool):
@@ -1002,6 +1121,7 @@ async def _fsub_check(client: Client, cb: CallbackQuery):
             "✅ <b>Join ho gaya!</b>\n\nAb apna TeraBox link bhejo.",
             parse_mode=ParseMode.HTML,
         )
+        await _send_welcome_dm(client, target)
     else:
         await cb.answer("❌ Pehle channel join karo ya membership check nahi ho paya!", show_alert=True)
 
@@ -1010,6 +1130,13 @@ async def _fsub_check(client: Client, cb: CallbackQuery):
 async def on_callback(client: Client, cb: CallbackQuery):
     data = cb.data or ""
     if not cb.message:
+        return
+    if data == "bc:cancel":
+        found = False
+        for bc_run in _broadcast_state.values():
+            bc_run["cancel"] = True
+            found = True
+        await cb.answer("⏹ Broadcast cancel ho rahi hai..." if found else "Koi broadcast active nahi hai.")
         return
     if data.startswith("fsubc:"):
         if cb.from_user and cb.from_user.id == cb.message.chat.id:
@@ -1089,7 +1216,11 @@ async def on_callback(client: Client, cb: CallbackQuery):
     elif data == "panel:gfsub":
         _pending[chat_id] = "fsub"
         await cb.message.edit_text(
-            "📢 <b>Force Join Channel Set</b>\n\nChannel ka <code>@username</code> ya integer id (e.g. <code>-1001234567890</code>) bhejo.\n\n/cancel se cancel.",
+            "📢 <b>Force Join Channel Set</b>\n\n"
+            "Koi bhi ek bhejo:\n"
+            "• Channel ka koi bhi msg <b>forward</b> karo (bot khud link bana lega)\n"
+            "• Channel ka link — https://t.me/xyz\n"
+            "• @username ya <code>-100...</code> id\n\n/cancel se cancel.",
             parse_mode=ParseMode.HTML,
         )
     elif data == "panel:rfsub":
@@ -1118,6 +1249,31 @@ async def on_callback(client: Client, cb: CallbackQuery):
     elif data == "panel:rwelcome":
         clear_welcome()
         await cb.answer("✅ Welcome message remove kar diya! Ab default msg dikhega.", show_alert=True)
+        await cb.message.edit_text(
+            _admin_text(), parse_mode=ParseMode.HTML, reply_markup=_admin_keyboard()
+        )
+    elif data == "panel:welcomedm":
+        cur = get_welcome_dm()
+        display = cur if cur else "(Set nahi hai)"
+        await cb.message.edit_text(
+            f"👋 <b>Welcome DM (Force Join)</b>\n\n"
+            f"Abhi: <b>{'Set ✅' if cur else 'Off'}</b>\n\n"
+            f"<b>Current Welcome DM:</b>\n{display}\n\n"
+            "Naya DM message bhejo. Ye user ko force join check ke baad DM me jayega.\n"
+            "(HTML formatting: <b>&lt;b&gt;</b>, <i>&lt;i&gt;</i>, <code>&lt;code&gt;</code>)\n\n"
+            "/cancel se cancel.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Remove Welcome DM", callback_data="panel:rwelcomedm", style=ButtonStyle.DANGER)],
+                [InlineKeyboardButton("🔙 Back", callback_data="panel:home", style=ButtonStyle.DEFAULT)],
+            ]) if cur else InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="panel:home", style=ButtonStyle.DEFAULT)],
+            ]),
+        )
+        _pending[chat_id] = "welcomedm"
+    elif data == "panel:rwelcomedm":
+        clear_welcome_dm()
+        await cb.answer("✅ Welcome DM remove kar diya!", show_alert=True)
         await cb.message.edit_text(
             _admin_text(), parse_mode=ParseMode.HTML, reply_markup=_admin_keyboard()
         )

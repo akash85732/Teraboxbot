@@ -27,6 +27,7 @@ def _ensure():
     _data.setdefault("fsub", "")
     _data.setdefault("auto_delete", None)
     _data.setdefault("welcome", "")
+    _data.setdefault("welcome_dm", "")
     _data.setdefault("stats", {})
     now = time.time()
     st = _data["stats"]
@@ -155,6 +156,23 @@ def clear_welcome() -> None:
     set_welcome("")
 
 
+# ================= WELCOME DM (force-join ke baad) =================
+
+def get_welcome_dm() -> str:
+    _ensure()
+    return str(_data.get("welcome_dm") or "")
+
+
+def set_welcome_dm(text: str) -> None:
+    _ensure()
+    _data["welcome_dm"] = (text or "").strip()
+    _save()
+
+
+def clear_welcome_dm() -> None:
+    set_welcome_dm("")
+
+
 def _joined_today() -> int:
     today = _today()
     n = 0
@@ -212,6 +230,7 @@ def import_db(raw: dict, overwrite: bool = True) -> tuple[int, int, str]:
         "fsub": str(raw.get("fsub") or ""),
         "auto_delete": raw.get("auto_delete"),
         "welcome": str(raw.get("welcome") or ""),
+        "welcome_dm": str(raw.get("welcome_dm") or ""),
         "stats": raw.get("stats") if isinstance(raw.get("stats"), dict) else {},
     }
 
@@ -229,6 +248,7 @@ def import_db(raw: dict, overwrite: bool = True) -> tuple[int, int, str]:
                 if incoming["auto_delete"] is not None
                 else (old.get("auto_delete") or None),
                 "welcome": incoming["welcome"] or (old.get("welcome") or ""),
+                "welcome_dm": incoming["welcome_dm"] or (old.get("welcome_dm") or ""),
                 "stats": {**old.get("stats", {}), **incoming["stats"]},
             }
             _data = merged
