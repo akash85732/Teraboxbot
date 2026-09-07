@@ -25,6 +25,8 @@ def _ensure():
     _data.setdefault("users", {})
     _data.setdefault("banned", [])
     _data.setdefault("fsub", "")
+    _data.setdefault("fsub_title", "")
+    _data.setdefault("fsub_link", "")
     _data.setdefault("auto_delete", None)
     _data.setdefault("welcome", "")
     _data.setdefault("welcome_dm", "")
@@ -110,14 +112,30 @@ def get_fsub() -> str:
     return str(_data.get("fsub") or "")
 
 
-def set_fsub(channel: str) -> None:
+def set_fsub(channel: str, title: str = "", link: str = "") -> None:
     _ensure()
     _data["fsub"] = (channel or "").strip().lstrip("@")
+    _data["fsub_title"] = (title or "").strip()
+    _data["fsub_link"] = (link or "").strip()
     _save()
 
 
+def get_fsub_title() -> str:
+    _ensure()
+    return str(_data.get("fsub_title") or "")
+
+
+def get_fsub_link() -> str:
+    _ensure()
+    return str(_data.get("fsub_link") or "")
+
+
 def clear_fsub() -> None:
-    set_fsub("")
+    _ensure()
+    _data["fsub"] = ""
+    _data["fsub_title"] = ""
+    _data["fsub_link"] = ""
+    _save()
 
 
 def get_auto_delete():
@@ -228,6 +246,8 @@ def import_db(raw: dict, overwrite: bool = True) -> tuple[int, int, str]:
         "users": raw.get("users") if isinstance(raw.get("users"), dict) else {},
         "banned": raw.get("banned") if isinstance(raw.get("banned"), list) else [],
         "fsub": str(raw.get("fsub") or ""),
+        "fsub_title": str(raw.get("fsub_title") or ""),
+        "fsub_link": str(raw.get("fsub_link") or ""),
         "auto_delete": raw.get("auto_delete"),
         "welcome": str(raw.get("welcome") or ""),
         "welcome_dm": str(raw.get("welcome_dm") or ""),
@@ -244,6 +264,8 @@ def import_db(raw: dict, overwrite: bool = True) -> tuple[int, int, str]:
                 "users": {**old.get("users", {}), **incoming["users"]},
                 "banned": list(dict.fromkeys(old.get("banned", []) + incoming["banned"])),
                 "fsub": incoming["fsub"] or (old.get("fsub") or ""),
+                "fsub_title": incoming["fsub_title"] or (old.get("fsub_title") or ""),
+                "fsub_link": incoming["fsub_link"] or (old.get("fsub_link") or ""),
                 "auto_delete": incoming["auto_delete"]
                 if incoming["auto_delete"] is not None
                 else (old.get("auto_delete") or None),

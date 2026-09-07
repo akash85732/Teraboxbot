@@ -47,6 +47,8 @@ from db import (
     export_db,
     get_auto_delete,
     get_fsub,
+    get_fsub_link,
+    get_fsub_title,
     get_stats,
     get_welcome,
     get_welcome_dm,
@@ -121,27 +123,37 @@ def _channel_link(channel: str) -> str:
 _FSUB_LINK_RE = re.compile(r"(?:https?://)?t(?:elegram)?\.me/([a-zA-Z0-9_]{5,})")
 
 
-def _extract_fsub_channel(message: Message) -> str:
-    """Extract a channel (@username / link / -100...id) from a forwarded
-    channel message or from typed link/username/id text."""
+def _extract_fsub_channel(message: Message) -> tuple[str, str]:
+    """Extract (identifier, title) of a channel from a forwarded channel
+    message or from typed link/username/id text.
+
+    - identifier: @username (public) ya -100... id (private) jo membership
+      check ke liye use hota hai.
+    - title: channel ka display name (dikhane ke liye).
+    """
     # 1) Forwarded message from a channel
     fwd = getattr(message, "forward_from_chat", None)
     if fwd is not None:
-        ch = getattr(fwd, "username", None) or getattr(fwd, "id", None)
-        if ch:
-            return str(ch).lstrip("@")
+        uname = getattr(fwd, "username", "") or ""
+        cid = getattr(fwd, "id", None)
+        title = getattr(fwd, "title", "") or ""
+        if uname:
+            return str(uname).lstrip("@"), (title or str(uname))
+        if cid:
+            return str(cid), (title or str(cid))
+        return "", ""
     # 2) Text input: link / @username / numeric id
     text = (message.text or "").strip()
     if not text:
-        return ""
+        return "", ""
     m = _FSUB_LINK_RE.search(text)
     if m:
-        return m.group(1)
+        return m.group(1), m.group(1)
     t = text.replace("https://", "").replace("http://", "")
     t = t.split("/")[0].lstrip("@")
     if t and (t.isdigit() or t.lstrip("-").isdigit() or t.startswith("@")):
-        return t.lstrip("+").replace("t.me/", "")
-    return t
+        return t.lstrip("+").replace("t.me/", ""), t
+    return t, t
 
 
 def _fmt_uptime(started: float) -> str:
@@ -266,15 +278,17 @@ async def _check_member(client: Client, channel: str, user_id: int):
 
 async def _send_fsub_prompt(client: Client, chat_id: int, user_id: int, fsub: str):
     """Send the force-subscribe join prompt with Join + Check buttons."""
+    title = get_fsub_title() or fsub.lstrip("@")
+    link = get_fsub_link() or _channel_link(fsub)
     try:
         await client.send_message(
             chat_id,
             f"🔒 <b>Channel Join Karo</b>\n\n"
             f"Bot use karne se pehle hamara channel join karna hoga:\n"
-            f"👉 <b>{safe_html(fsub.lstrip('@'))}</b>",
+            f"👉 <b>{safe_html(title)}</b>",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📢 Join Channel", url=_channel_link(fsub), style=ButtonStyle.PRIMARY),
+                InlineKeyboardButton("📢 Join Channel", url=link, style=ButtonStyle.PRIMARY),
                 InlineKeyboardButton("✅ Check Karo", callback_data=f"fsubc:{user_id}", style=ButtonStyle.SUCCESS),
             ]]),
         )
@@ -757,26 +771,36 @@ async def admin_cmd(client: Client, message: Message):
 
 
 async def _send_db_backup(client: Client, chat_id: int):
+    tmp_path = ""
     try:
         data = export_db()
-        raw = json.dumps(data, ensure_ascii=False, indent=1).encode()
-        await client.send_document(
-            chat_id,
-            io.BytesIO(raw),
-            file_name="bot_db.json",
-            caption=(
-                "🗄 <b>Database Backup</b>\n\n"
-                f"👥 Users: {len(data.get('users', {}))}\n"
-                f"🚫 Banned: {len(data.get('banned', []))}\n"
-                f"🔒 Force Join: <code>{safe_html(data.get('fsub') or '—')}</code>\n\n"
-                "Ye file khud ke paas save rakho. Restore karne ke liye "
-                "ye file yahan waapis bhejo aur /importdb type karo."
-            ),
-            parse_mode=ParseMode.HTML,
-        )
+        os.makedirs(Config.DOWNLOAD_DIR, exist_ok=True)
+        tmp_path = os.path.join(Config.DOWNLOAD_DIR, "bot_db_backup.json")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        name = get_fsub_title() or data.get("fsub") or "—"
+        try:
+            await client.send_document(
+                chat_id,
+                tmp_path,
+                caption=(
+                    "🗄 <b>Database Backup</b>\n\n"
+                    f"👥 Users: {len(data.get('users', {}))}\n"
+                    f"🚫 Banned: {len(data.get('banned', []))}\n"
+                    f"🔒 Force Join: <code>{safe_html(name)}</code>\n\n"
+                    "Ye file khud ke paas save rakho. Restore karne ke liye "
+                    "ye file yahan waapis bhejo aur /importdb type karo."
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        finally:
+            _cleanup_file(tmp_path)
     except Exception as e:
         logger.error("DB export failed: %s", e, exc_info=True)
-        await client.send_message(chat_id, "❌ Database export fail ho gaya.")
+        try:
+            await client.send_message(chat_id, "❌ Database export fail ho gaya.")
+        except Exception:
+            pass
 
 
 @app.on_message(filters.command("db") & filters.private)
@@ -924,6 +948,7 @@ def _admin_text() -> str:
 def _stats_text() -> str:
     s = get_stats()
     fsub = get_fsub() or Config.FSUB_CHANNEL
+    fsub_title = get_fsub_title() or fsub
     lines = []
     for uid, info in recent_users(10):
         name = safe_html(info.get("name") or str(uid))
@@ -941,7 +966,7 @@ def _stats_text() -> str:
         f"💾 <b>Data Served:</b> {format_size(s['bytes'])}\n"
         f"🚫 <b>Banned:</b> {s['banned']}\n"
         f"⏱ <b>Uptime:</b> {_fmt_uptime(s['started'])}\n"
-        f"🔒 <b>Force Join:</b> <code>{safe_html(fsub)}</code>\n\n"
+        f"🔒 <b>Force Join:</b> <code>{safe_html(fsub_title)}</code>\n\n"
         f"👤 <b>Recent Users:</b>\n{recent}"
     )
 
@@ -978,12 +1003,19 @@ async def _handle_pending(client: Client, message: Message) -> bool:
         else:
             await _send_status(client, chat_id, "❌ Welcome DM khaali nahi ho sakta. /cancel se band karo.")
     elif action == "fsub":
-        value = _extract_fsub_channel(message)
+        value, title = _extract_fsub_channel(message)
         if value:
-            set_fsub(value)
+            invite = ""
+            if value.startswith("-100"):
+                try:
+                    invite = await client.export_chat_invite_link(value)
+                except Exception:
+                    invite = ""
+            set_fsub(value, title=title or value, link=invite)
             await _send_status(
                 client, chat_id,
-                f"✅ Force join channel set: <code>{safe_html(value)}</code>\n\n"
+                f"✅ Force join channel set:\n"
+                f"📢 <b>{safe_html(title or value)}</b>\n\n"
                 f"Ab users ko channel join karna zaroori hoga.",
             )
         else:
