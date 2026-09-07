@@ -12,7 +12,8 @@ class Config:
 
     # Bot settings
     DUMP_CHANNEL_ID = int(os.environ.get("DUMP_CHANNEL_ID", 0))
-    OWNER_ID = int(os.environ.get("OWNER_ID", 0))
+    # Multiple owner ids supported: comma-separated, e.g. "123,456,789"
+    OWNER_ID = os.environ.get("OWNER_ID", "0")
     MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", 2147483648))  # 2GB default
     WORKERS = int(os.environ.get("WORKERS", 8))
 

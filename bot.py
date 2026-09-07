@@ -15,6 +15,7 @@ import os
 import io
 import re
 import math
+import json
 import time
 import asyncio
 import inspect
@@ -42,10 +43,12 @@ from db import (
     ban_user,
     clear_fsub,
     clear_welcome,
+    export_db,
     get_auto_delete,
     get_fsub,
     get_stats,
     get_welcome,
+    import_db,
     inc_download,
     is_banned,
     recent_users,
@@ -83,6 +86,7 @@ dl_sem = asyncio.Semaphore(getattr(Config, "MAX_CONCURRENT_DOWNLOADS", 3))
 rate_limited: dict[int, float] = {}
 _pending: dict[int, str] = {}
 _cancel_req: dict[int, bool] = {}
+_db_import: dict[int, dict] = {}
 
 
 class DownloadCancelled(Exception):
@@ -187,6 +191,16 @@ async def _auto_delete(client: Client, chat_id: int, msg_id: int, after: int):
         pass
 
 
+async def _download_document_json(client: Client, message: Message) -> dict:
+    """Download a .json document and parse it into a dict."""
+    fp = await client.download_media(message, in_memory=True)
+    raw = fp.getvalue()
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("JSON root must be an object")
+    return data
+
+
 # ---------------------------------------------------------------- chat helpers
 async def _send_status(client: Client, chat_id: int, text: str):
     try:
@@ -220,6 +234,24 @@ async def _check_member(client: Client, channel: str, user_id: int):
         return None
 
 
+async def _send_fsub_prompt(client: Client, chat_id: int, user_id: int, fsub: str):
+    """Send the force-subscribe join prompt with Join + Check buttons."""
+    try:
+        await client.send_message(
+            chat_id,
+            f"🔒 <b>Channel Join Karo</b>\n\n"
+            f"Bot use karne se pehle hamara channel join karna hoga:\n"
+            f"👉 <b>{safe_html(fsub.lstrip('@'))}</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📢 Join Channel", url=_channel_link(fsub), style=ButtonStyle.PRIMARY),
+                InlineKeyboardButton("✅ Check Karo", callback_data=f"fsubc:{user_id}", style=ButtonStyle.SUCCESS),
+            ]]),
+        )
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------- main flow
 async def handle_link(client: Client, message: Message, link: str):
     user_id = message.from_user.id if message.from_user else message.chat.id
@@ -232,21 +264,8 @@ async def handle_link(client: Client, message: Message, link: str):
     fsub = get_fsub() or Config.FSUB_CHANNEL
     if fsub and not is_owner(user_id):
         member = await _check_member(client, fsub, user_id)
-        if member is False:
-            try:
-                await client.send_message(
-                    chat_id,
-                    f"🔒 <b>Channel Join Karo</b>\n\n"
-                    f"Download shuru karne se pehle hamara channel join karna hoga:\n"
-                    f"👉 <b>{safe_html(fsub.lstrip('@'))}</b>",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("📢 Join Channel", url=_channel_link(fsub), style=ButtonStyle.PRIMARY),
-                        InlineKeyboardButton("✅ Check Karo", callback_data=f"fsubc:{user_id}", style=ButtonStyle.SUCCESS),
-                    ]]),
-                )
-            except Exception:
-                pass
+        if member is not True:
+            await _send_fsub_prompt(client, chat_id, user_id, fsub)
             return
 
     if not _can_use(user_id):
@@ -618,8 +637,10 @@ def _help_text() -> str:
         "/start - Bot start\n"
         "/help - Yeh madad message\n"
         "/cancel - Chalu download/action cancel\n"
-        "/admin - Admin panel (sirf owner)\n\n"
-        "<b>Note:</b> Bheji gayi file auto-delete hoti hai, isliye turant forward karke save kar lo."
+        "/admin - Admin panel (sirf owner)\n"
+        "/db - Database backup file (sirf owner)\n\n"
+        "<b>Note:</b> Bot use karne ke liye khas channel join karna zaroori ho sakta hai. "
+        "Bheji gayi file auto-delete hoti hai, isliye turant forward karke save kar lo."
     )
 
 
@@ -651,6 +672,14 @@ def _download_keyboard() -> InlineKeyboardMarkup:
 async def start_cmd(client: Client, message: Message):
     if message.from_user:
         track_user(message.from_user)
+    chat_id = message.chat.id
+    user_id = message.from_user.id if message.from_user else 0
+    fsub = get_fsub() or Config.FSUB_CHANNEL
+    if fsub and not is_owner(user_id):
+        member = await _check_member(client, fsub, user_id)
+        if member is not True:
+            await _send_fsub_prompt(client, chat_id, user_id, fsub)
+            return
     await message.reply_text(
         _start_text(),
         parse_mode=ParseMode.HTML,
@@ -681,6 +710,60 @@ async def admin_cmd(client: Client, message: Message):
     )
 
 
+async def _send_db_backup(client: Client, chat_id: int):
+    try:
+        data = export_db()
+        raw = json.dumps(data, ensure_ascii=False, indent=1).encode()
+        await client.send_document(
+            chat_id,
+            io.BytesIO(raw),
+            file_name="bot_db.json",
+            caption=(
+                "🗄 <b>Database Backup</b>\n\n"
+                f"👥 Users: {len(data.get('users', {}))}\n"
+                f"🚫 Banned: {len(data.get('banned', []))}\n"
+                f"🔒 Force Join: <code>{safe_html(data.get('fsub') or '—')}</code>\n\n"
+                "Ye file khud ke paas save rakho. Restore karne ke liye "
+                "ye file yahan waapis bhejo aur /importdb type karo."
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        logger.error("DB export failed: %s", e, exc_info=True)
+        await client.send_message(chat_id, "❌ Database export fail ho gaya.")
+
+
+@app.on_message(filters.command("db") & filters.private)
+async def db_cmd(client: Client, message: Message):
+    if not (message.from_user and is_owner(message.from_user.id)):
+        return
+    await _send_db_backup(client, message.chat.id)
+
+
+@app.on_message(filters.command("importdb") & filters.private)
+async def importdb_cmd(client: Client, message: Message):
+    if not (message.from_user and is_owner(message.from_user.id)):
+        return
+    pending = _db_import.get(message.chat.id)
+    if not pending:
+        await message.reply_text(
+            "❌ Pehle database file (.json) bhejo, phir /importdb type karo."
+        )
+        return
+    try:
+        users, banned, fsub = import_db(pending)
+        _db_import.pop(message.chat.id, None)
+        await message.reply_text(
+            "✅ <b>Database restore ho gaya!</b>\n\n"
+            f"👥 Users: {users}\n"
+            f"🚫 Banned: {banned}\n"
+            f"🔒 Force Join: <code>{safe_html(fsub)}</code>"
+        )
+    except Exception as e:
+        logger.error("DB import failed: %s", e)
+        await message.reply_text(f"❌ Database import fail: {e}")
+
+
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_cmd(client: Client, message: Message):
     chat_id = message.chat.id
@@ -706,6 +789,25 @@ async def on_private(client: Client, message: Message):
         await _handle_pending(client, message)
         return
     if not message.text:
+        # Owner ne .json database file bheji -> import ke liye store karo
+        if message.document and message.from_user and is_owner(message.from_user.id):
+            fname = (message.document.file_name or "").lower()
+            if fname.endswith(".json"):
+                if message.document.file_size and message.document.file_size > 5 * 1024 * 1024:
+                    await message.reply_text("❌ Database file 5MB se badi nahi ho sakti.")
+                    return
+                try:
+                    data = await _download_document_json(client, message)
+                    _db_import[message.chat.id] = data
+                    await message.reply_text(
+                        "📥 <b>Database file mil gayi!</b>\n\n"
+                        "Confirm karne ke liye: <code>/importdb</code> type karo.\n"
+                        "Agar ye sahi file hai to hi import hona chahiye."
+                    )
+                except Exception as e:
+                    logger.error("DB file download failed: %s", e)
+                    await message.reply_text("❌ Database file padh nahi paya. Sahi .json file bhejo.")
+            return
         return
     if not _mark_handled(message.chat.id, message.id):
         return
@@ -742,6 +844,7 @@ def _admin_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("✅ Unban User", callback_data="panel:unban", style=ButtonStyle.SUCCESS),
         ],
         [InlineKeyboardButton("👋 Set Welcome", callback_data="panel:welcome", style=ButtonStyle.PRIMARY)],
+        [InlineKeyboardButton("🗄 Database Backup", callback_data="panel:db", style=ButtonStyle.PRIMARY)],
         [InlineKeyboardButton("🗑 Close", callback_data="panel:close", style=ButtonStyle.DANGER)],
     ])
 
@@ -899,13 +1002,8 @@ async def _fsub_check(client: Client, cb: CallbackQuery):
             "✅ <b>Join ho gaya!</b>\n\nAb apna TeraBox link bhejo.",
             parse_mode=ParseMode.HTML,
         )
-    elif status is False:
-        await cb.answer("❌ Channel abhi bhi join nahi kia!", show_alert=True)
     else:
-        await cb.message.edit_text(
-            "⚠️ <b>Check nahi ho paya.</b>\n\nChannel join kar liya hai to link bhej do.",
-            parse_mode=ParseMode.HTML,
-        )
+        await cb.answer("❌ Pehle channel join karo ya membership check nahi ho paya!", show_alert=True)
 
 
 @app.on_callback_query()
@@ -1023,6 +1121,9 @@ async def on_callback(client: Client, cb: CallbackQuery):
         await cb.message.edit_text(
             _admin_text(), parse_mode=ParseMode.HTML, reply_markup=_admin_keyboard()
         )
+    elif data == "panel:db":
+        await cb.answer()
+        await _send_db_backup(client, cb.message.chat.id)
     elif data == "panel:ban":
         _pending[chat_id] = "ban"
         await cb.message.edit_text(

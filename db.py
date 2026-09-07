@@ -185,3 +185,58 @@ def get_stats() -> dict:
         "started": st.get("started", 0),
         "banned": len(_data.get("banned", [])),
     }
+
+
+# ================= DATABASE EXPORT / IMPORT =================
+
+def export_db() -> dict:
+    """Return a copy of the whole in-memory database."""
+    _ensure()
+    with _lock:
+        return json.loads(json.dumps(_data))
+
+
+def import_db(raw: dict, overwrite: bool = True) -> tuple[int, int, str]:
+    """
+    Import database data. When overwrite=True the current in-memory + on-disk
+    database is fully replaced. Returns (users, banned, fsub).
+    """
+    global _data
+    if not isinstance(raw, dict):
+        raise ValueError("Invalid database: expected a JSON object.")
+    _ensure()
+
+    incoming = {
+        "users": raw.get("users") if isinstance(raw.get("users"), dict) else {},
+        "banned": raw.get("banned") if isinstance(raw.get("banned"), list) else [],
+        "fsub": str(raw.get("fsub") or ""),
+        "auto_delete": raw.get("auto_delete"),
+        "welcome": str(raw.get("welcome") or ""),
+        "stats": raw.get("stats") if isinstance(raw.get("stats"), dict) else {},
+    }
+
+    with _lock:
+        old = json.loads(json.dumps(_data)) if _data is not None else {}
+        if overwrite:
+            _data = incoming
+        else:
+            # merge: keep existing keys, add/overwrite incoming ones
+            merged = {
+                "users": {**old.get("users", {}), **incoming["users"]},
+                "banned": list(dict.fromkeys(old.get("banned", []) + incoming["banned"])),
+                "fsub": incoming["fsub"] or (old.get("fsub") or ""),
+                "auto_delete": incoming["auto_delete"]
+                if incoming["auto_delete"] is not None
+                else (old.get("auto_delete") or None),
+                "welcome": incoming["welcome"] or (old.get("welcome") or ""),
+                "stats": {**old.get("stats", {}), **incoming["stats"]},
+            }
+            _data = merged
+
+    _save()
+
+    return (
+        len(_data["users"]),
+        len(_data["banned"]),
+        _data.get("fsub") or "",
+    )
