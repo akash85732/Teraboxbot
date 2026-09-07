@@ -31,6 +31,7 @@ from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LinkPreviewOptions,
     Message,
 )
 
@@ -191,7 +192,7 @@ async def _send_status(client: Client, chat_id: int, text: str):
     try:
         return await client.send_message(
             chat_id, text, parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
     except Exception:
         return None
@@ -201,7 +202,7 @@ async def _edit_status(client: Client, chat_id: int, msg_id: int, text: str):
     try:
         return await client.edit_message_text(
             chat_id, msg_id, text, parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
     except Exception:
         return None
@@ -266,7 +267,9 @@ async def handle_link(client: Client, message: Message, link: str):
         )
 
         # threadpool: async event loop kabhi block nahi hone denge
-        file_info = await asyncio.to_thread(_resolve_sync, link)
+        file_info = await asyncio.wait_for(
+            asyncio.to_thread(_resolve_sync, link), timeout=60
+        )
         file_name = file_info.get("filename") or ""
         file_size = int(file_info.get("size") or file_info.get("file_size") or 0)
 
@@ -576,7 +579,7 @@ app = FastUploadClient(
     api_hash=Config.API_HASH,
     bot_token=Config.BOT_TOKEN,
     workdir=".",
-    workers=1,
+    workers=3,
 )
 
 
@@ -652,7 +655,7 @@ async def start_cmd(client: Client, message: Message):
         _start_text(),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(_start_keyboard(message.from_user)),
-        disable_web_page_preview=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
 
@@ -664,7 +667,7 @@ async def help_cmd(client: Client, message: Message):
         _help_text(),
         parse_mode=ParseMode.HTML,
         reply_markup=_help_keyboard(),
-        disable_web_page_preview=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
 
@@ -921,7 +924,7 @@ async def on_callback(client: Client, cb: CallbackQuery):
             _start_text(),
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(_start_keyboard(cb.from_user)),
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         await cb.answer()
         return
@@ -930,7 +933,7 @@ async def on_callback(client: Client, cb: CallbackQuery):
             _help_text(),
             parse_mode=ParseMode.HTML,
             reply_markup=_help_keyboard(),
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         await cb.answer()
         return
@@ -939,7 +942,7 @@ async def on_callback(client: Client, cb: CallbackQuery):
             _download_text(),
             parse_mode=ParseMode.HTML,
             reply_markup=_download_keyboard(),
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         await cb.answer()
         return
