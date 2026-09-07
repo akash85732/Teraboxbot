@@ -1,4 +1,4 @@
-pyrogram @ git+https://github.com/TelegramPlayGround/PyroTGFork.git
+pyrotgfork==2.2.24
 tgcrypto==1.2.5
 aiohttp==3.9.5
 aiofiles==23.2.1
