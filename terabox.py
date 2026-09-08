@@ -161,7 +161,21 @@ async def get_file_info(link: str) -> Optional[dict]:
     if link_origin and link_origin not in apis:
         apis.insert(0, link_origin)
 
-    # PRIMARY: Official TeraBox APIs (session + jsToken + optional cookie)
+    # PRIMARY: teraboxdl.site worker -> cookie-free direct dl-worker link.
+    #
+    # Since TeraBox started blocking datacenter downloads (official
+    # /share/streaming & /share/download return errno -21 "no authentic" /
+    # verify_v2 unless the exact logging-in session is re-used), the only
+    # candidate that reliably downloads is the worker direct link. Try it
+    # first so videos never land on dead official candidates.
+    try:
+        worker_res = await _worker_teraboxdl_site(link)
+        if worker_res:
+            return worker_res
+    except Exception as e:
+        logger.warning(f"teraboxdl.site (primary) failed: {e}")
+
+    # SECONDARY: Official TeraBox APIs (session + jsToken + optional cookie).
     official_res = await _first_working_official(
         apis, surl_id, cookie_header
     )
@@ -195,10 +209,15 @@ async def get_file_info(link: str) -> Optional[dict]:
 
 async def _get_worker_direct(link: str) -> str:
     """
-    Fetch an instant cookie-free worker direct link from multiple gateway APIs
-    (in parallel). These dl-worker.teraboxdl.site / worker.dev links need no
-    cookies, so Telegram's own servers can download them directly - enabling
+    Fetch an instant cookie-free worker direct link from gateway APIs that are
+    currently alive (external TeraBox workers churn often; dead ones are removed
+    so they never stall the request). These dl-worker.teraboxdl.site links need
+    no cookies, so Telegram's own servers can download them directly - enabling
     near-instant delivery with no VPS-side re-upload at all.
+
+    NOTE: dl-worker.teraboxdl.site does NOT support HTTP Range requests (returns
+    500), so large files are fetched over a single stream - the downloader
+    already falls back to that automatically.
     """
 
     def _worker_tdl_direct() -> str:
@@ -208,7 +227,7 @@ async def _get_worker_direct(link: str) -> str:
             r = s.post(
                 "https://api.teraboxdl.site/api/test",
                 json={"url": link},
-                timeout=6,
+                timeout=20,
             )
             data = r.json()
             if data.get("status") == "success" and "data" in data and "list" in data["data"]:
@@ -219,44 +238,10 @@ async def _get_worker_direct(link: str) -> str:
             logger.warning(f"teraboxdl.site API failed: {e}")
         return ""
 
-    def _worker_nepcoder() -> str:
-        try:
-            r = requests.get(
-                f"https://teraboxvideodownloader.nepcoderdevs.workers.dev/api?data={quote(link)}",
-                headers=get_headers(),
-                timeout=8,
-            )
-            res = _extract_worker_result(r.json())
-            if res:
-                return res.get("download_link", "") or ""
-        except Exception as e:
-            logger.warning(f"nepcoder worker failed: {e}")
-        return ""
-
-    def _worker_uday() -> str:
-        try:
-            r = requests.get(
-                f"https://terabox.udayscriptsx.workers.dev/api?data={quote(link)}",
-                headers=get_headers(),
-                timeout=8,
-            )
-            res = _extract_worker_result(r.json())
-            if res:
-                return res.get("download_link", "") or ""
-        except Exception as e:
-            logger.warning(f"uday worker failed: {e}")
-        return ""
-
-    results = await asyncio.gather(
-        asyncio.to_thread(_worker_tdl_direct),
-        asyncio.to_thread(_worker_nepcoder),
-        asyncio.to_thread(_worker_uday),
-    )
-    for d in results:
-        if d:
-            logger.info(f"Worker direct link obtained: {d[:60]}...")
-            return d
-    return ""
+    result = await asyncio.to_thread(_worker_tdl_direct)
+    if result:
+        logger.info(f"Worker direct link obtained: {result[:60]}...")
+    return result
 
 
 async def _first_working_official(
@@ -454,16 +439,13 @@ async def _try_api_endpoint(
 
 
 async def _try_third_party_api(link: str) -> Optional[dict]:
-    """Try third-party TeraBox API worker extractors (last resort)."""
+    """Try third-party TeraBox API worker extractors (last resort).
+
+    teraboxdl.site is intentionally NOT retried here - get_file_info already
+    tried it first. These remaining workers are best-effort and fail fast.
+    """
     timeout = aiohttp.ClientTimeout(total=15)
     headers = get_headers()
-
-    # PRIMARY fallback: teraboxdl.site - stable cookie-free worker that returns
-    # a direct download link (works from data-center IPs where TeraBox blocks
-    # official JS/session APIs with a bot-check).
-    direct = await _worker_teraboxdl_site(link)
-    if direct:
-        return direct
 
     apis = [
         f"https://teraboxvideodownloader.nepcoderdevs.workers.dev/api?data={quote(link)}",

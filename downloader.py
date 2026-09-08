@@ -224,8 +224,12 @@ class Downloader:
 
                         # FAST PATH: parallel multi-connection ranged download for
                         # large files (can be 3-8x faster when source throttles
-                        # a single connection). Falls back to single-stream below.
+                        # a single connection). Many CDNs don't support Range
+                        # (e.g. dl-worker.teraboxdl.site returns 500) - never let
+                        # that kill the download, it just falls back to
+                        # single-stream below.
                         if content_length and content_length >= 64 * 1024 * 1024:
+                            cancelled = False
                             try:
                                 return await _download_ranged(
                                     session=session,
@@ -236,13 +240,20 @@ class Downloader:
                                     task_id=task_id,
                                     progress_callback=progress_callback,
                                 )
-                            except DownloadError:
-                                raise
+                            except DownloadError as e:
+                                if "cancell" in str(e).lower():
+                                    cancelled = True
+                                logger.warning(
+                                    f"Parallel download failed ({e}), falling back to "
+                                    f"single-stream"
+                                )
                             except Exception as e:
                                 logger.warning(
                                     f"Parallel download failed, falling back to "
                                     f"single-stream ({e})"
                                 )
+                            if cancelled:
+                                raise DownloadError("Download cancelled")
 
                         async with aiofiles.open(filepath, "wb") as f:
                             await f.write(prefix)
@@ -517,17 +528,29 @@ async def _download_ranged(
     """
     ranges_ok = False
     try:
-        async with session.get(
-            url, allow_redirects=True, headers={"Range": "bytes=0-0"}
-        ) as probe:
-            if probe.status == 206 and probe.headers.get("Content-Range", ""):
-                # Genuine byte-range support - safe to parallelize.
-                ranges_ok = True
-            probe_bytes = await probe.content.read(2048)
-            probe_text = probe_bytes.decode("utf-8", errors="replace")
-            if "verify_v2" in probe_text or "400310" in probe_text or "errno" in probe_text:
-                ranges_ok = False
-                logger.warning("Parallel probe returned TeraBox error JSON - disabling parallel")
+        # Some sources (dl-worker.teraboxdl.site) don't answer Range requests at
+        # all and just stream - the probe would hang forever otherwise. Cap it
+        # hard so the caller falls back to a single-stream download.
+        probe = await asyncio.wait_for(
+            session.get(
+                url, allow_redirects=True, headers={"Range": "bytes=0-0"}
+            ),
+            timeout=8,
+        )
+        try:
+            async with probe:
+                if probe.status == 206 and probe.headers.get("Content-Range", ""):
+                    # Genuine byte-range support - safe to parallelize.
+                    ranges_ok = True
+                probe_bytes = await probe.content.read(2048)
+                probe_text = probe_bytes.decode("utf-8", errors="replace")
+                if "verify_v2" in probe_text or "400310" in probe_text or "errno" in probe_text:
+                    ranges_ok = False
+                    logger.warning("Parallel probe returned TeraBox error JSON - disabling parallel")
+        except Exception:
+            pass
+    except asyncio.TimeoutError:
+        logger.warning("Range probe timed out - disabling parallel download")
     except Exception as e:
         logger.warning(f"Range probe failed: {e}")
 
