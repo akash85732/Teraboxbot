@@ -434,52 +434,35 @@ async def _try_third_party_api(link: str) -> Optional[dict]:
     """Try third-party TeraBox API worker extractors (last resort).
 
     teraboxdl.site is intentionally NOT retried here - get_file_info already
-    tried it first. These remaining workers are best-effort and fail fast.
+    tried it first.
+
+    NOTE: The previously-used worker backends are mostly dead and were removed
+    so they never stall the request:
+      - teraboxvideodownloader.nepcoderdevs.workers.dev   (HTTP 530)
+      - terabox.udayscriptsx.workers.dev                  (HTTP 400)
+      - terabox-dl.qtamaki.hackclub.app                   (SSL handshake fail)
+      - terabox.deno.dev                                  (Deno Deploy sunset)
+    The only live public backend is the MN-BOTS worker. It returns "success"
+    with a `qualities` map when it can resolve a file, or a user-redirect
+    fallback when it cannot. This is best-effort and fails fast.
     """
     timeout = aiohttp.ClientTimeout(total=15)
     headers = get_headers()
 
-    apis = [
-        f"https://teraboxvideodownloader.nepcoderdevs.workers.dev/api?data={quote(link)}",
-        f"https://terabox.udayscriptsx.workers.dev/api?data={quote(link)}",
-    ]
-
-    for api_url in apis:
-        try:
-            connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
-            async with aiohttp.ClientSession(headers=headers, timeout=timeout, connector=connector) as session:
-                async with session.get(api_url) as resp:
-                    if resp.status != 200:
-                        continue
+    api_url = f"https://terabox-api.mn-bots.workers.dev/download?url={quote(link)}"
+    try:
+        connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
+        async with aiohttp.ClientSession(
+            headers=headers, timeout=timeout, connector=connector
+        ) as session:
+            async with session.get(api_url) as resp:
+                if resp.status == 200:
                     data = await resp.json(content_type=None)
-                    result = _extract_worker_result(data)
+                    result = _extract_mn_bots_result(data)
                     if result:
                         return result
-        except Exception as e:
-            logger.warning(f"Third party API {api_url} failed: {e}")
-            continue
-
-    # Last resort fallback: additional third-party worker APIs
-    apis_extra = [
-        f"https://terabox-dl.qtamaki.hackclub.app/api?data={quote(link)}",
-        f"https://terabox.deno.dev/?url={quote(link)}",
-    ]
-    for api_url in apis_extra:
-        try:
-            connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
-            async with aiohttp.ClientSession(
-                headers=headers, timeout=timeout, connector=connector
-            ) as session:
-                async with session.get(api_url) as resp:
-                    if resp.status != 200:
-                        continue
-                    data = await resp.json(content_type=None)
-                    result = _extract_worker_result(data)
-                    if result:
-                        return result
-        except Exception as e:
-            logger.warning(f"Extra API {api_url} failed: {e}")
-            continue
+    except Exception as e:
+        logger.warning(f"Third party API {api_url} failed: {e}")
 
     return None
 
@@ -611,6 +594,55 @@ def _extract_worker_result(data) -> Optional[dict]:
             }
 
     return None
+
+
+def _extract_mn_bots_result(data) -> Optional[dict]:
+    """Parse the MN-BOTS worker API response into the standard format.
+
+    Sample shape:
+        {
+          "success": true,
+          "filename": "...", "size": 123, "best_quality": "720p",
+          "qualities": {"720p": "...", "480p": "..."},
+          "media_url": "https://terabox-api.mn-bots.workers.dev/dl/...",
+          "direct_download_url": "...",
+        }
+
+    When `success` is false the worker returns a flowvideoplayer user-redirect
+    fallback (no file) - treat that as "no result" so get_file_info moves on.
+    """
+    if not isinstance(data, dict) or not data.get("success"):
+        return None
+
+    qualities = data.get("qualities") or {}
+    best = data.get("best_quality") or ""
+
+    candidates: list[str] = []
+    ordering = [best, "HD Video", "1080p", "720p", "480p", "Original", "Fast Download"]
+    for q in ordering:
+        u = ""
+        if isinstance(qualities, dict):
+            u = qualities.get(q) or ""
+            if not u and str(q) != q:
+                u = qualities.get(str(q)) or ""
+        if u and u not in candidates and isinstance(u, str):
+            candidates.append(u)
+    for key in ("media_url", "direct_download_url"):
+        u = data.get(key) or ""
+        if u and u not in candidates and isinstance(u, str):
+            candidates.append(u)
+
+    if not candidates:
+        return None
+
+    return {
+        "filename": data.get("filename") or "terabox_video.mp4",
+        "size": int(data.get("size") or 0),
+        "thumbnail": "",
+        "download_link": candidates.pop(0),
+        "alt_links": candidates,
+        "is_dir": False,
+    }
 
 
 def format_size(size_bytes: int) -> str:
