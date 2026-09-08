@@ -33,7 +33,7 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-from cookie import load_cookie_header
+from cookie import load_cookie_header, all_cookie_headers
 
 logger = logging.getLogger(__name__)
 
@@ -214,9 +214,23 @@ async def get_file_info(link: str) -> Optional[dict]:
 async def _resolve_unwrapped(link: str, surl_id: str) -> dict:
     """Actual resolve logic (no caching)."""
     try:
-        cookie_header = load_cookie_header()
+        cookie_headers = all_cookie_headers()
     except Exception:
-        cookie_header = ""
+        cookie_headers = []
+    try:
+        round_robin_cookie = load_cookie_header()
+    except Exception:
+        round_robin_cookie = ""
+    # Rotate the pool so repeated requests don't always hit the same account.
+    # The first attempt uses the round-robin cookie, then the rest of the pool.
+    ordered_cookies = []
+    if round_robin_cookie and round_robin_cookie not in ordered_cookies:
+        ordered_cookies.append(round_robin_cookie)
+    for c in cookie_headers:
+        if c and c not in ordered_cookies:
+            ordered_cookies.append(c)
+    # Always include "" last so cookies can never make things *worse*.
+    ordered_cookies.append("")
 
     parsed = urlparse(link)
     link_origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
@@ -230,40 +244,31 @@ async def _resolve_unwrapped(link: str, surl_id: str) -> dict:
     if link_origin and link_origin not in apis:
         apis.insert(0, link_origin)
 
-    # PRIMARY: teraboxdl.site worker -> cookie-free direct dl-worker link.
-    #
-    # Since TeraBox started blocking datacenter downloads (official
-    # /share/streaming & /share/download return errno -21 "no authentic" /
-    # verify_v2 unless the exact logging-in session is re-used), the only
-    # candidate that reliably downloads is the worker direct link. Try it
-    # first so videos never land on dead official candidates.
+    # PRIMARY: Official TeraBox APIs with the user's cookie. Download via the
+    # authenticated session first so the ndus cookie is actually used. Each
+    # account cookie is tried across every mirror in its own fresh session; a
+    # bad/rate-limited account is skipped cleanly. The trailing "" (no-cookie)
+    # attempt is kept as the very last official try.
+    official_res = None
+    for i, cookie_header in enumerate(ordered_cookies):
+        if cookie_header:
+            logger.info(f"Trying official API with cookie #{i + 1}/{len(ordered_cookies) - 1}"
+                        f" (account {i + 1})")
+        official_res = await _first_working_official(apis, surl_id, cookie_header)
+        if official_res:
+            break
+    if official_res:
+        return official_res
+
+    # SECONDARY: teraboxdl.site worker -> cookie-free direct dl-worker link.
+    # Only used when no cookie-using official API worked (cookie invalid /
+    # rate-limited / datacenter-IP blocked).
     try:
         worker_res = await _worker_teraboxdl_site(link)
         if worker_res:
             return worker_res
     except Exception as e:
-        logger.warning(f"teraboxdl.site (primary) failed: {e}")
-
-    # SECONDARY: Official TeraBox APIs (session + jsToken + optional cookie).
-    official_res = await _first_working_official(
-        apis, surl_id, cookie_header
-    )
-    if official_res:
-        # Boost with instant worker direct link when available - gives Telegram
-        # a URL it can fetch itself (near-instant delivery) and gives the
-        # downloader the fastest CDN candidate.
-        try:
-            worker_dlink = await _get_worker_direct(link)
-            if worker_dlink:
-                current = official_res.get("download_link") or ""
-                official_res["alt_links"] = [
-                    l for l in ([current] + list(official_res.get("alt_links", [])))
-                    if l and l != worker_dlink
-                ]
-                official_res["download_link"] = worker_dlink
-        except Exception as e:
-            logger.warning(f"Worker direct link boost failed: {e}")
-        return official_res
+        logger.warning(f"teraboxdl.site (fallback) failed: {e}")
 
     # FALLBACK: Third-party worker APIs (last resort)
     try:
@@ -274,34 +279,6 @@ async def _resolve_unwrapped(link: str, surl_id: str) -> dict:
         logger.warning(f"Third party APIs failed: {e}")
 
     return {"error": "Failed to fetch file info from TeraBox."}
-
-
-async def _get_worker_direct(link: str) -> str:
-    """
-    Fetch an instant cookie-free worker direct link from gateway APIs that are
-    currently alive (external TeraBox workers churn often; dead ones are removed
-    so they never stall the request). These dl-worker.teraboxdl.site links need
-    no cookies, so Telegram's own servers can download them directly - enabling
-    near-instant delivery with no VPS-side re-upload at all.
-
-    NOTE: dl-worker.teraboxdl.site is a Cloudflare worker - Range support is
-    flaky (sometimes 206, sometimes 500). The downloader probes safely and
-    falls back to a single stream automatically.
-    """
-
-    def _worker_tdl_direct() -> str:
-        try:
-            res = _worker_teraboxdl_site_sync(link)
-            if res:
-                return res.get("download_link", "") or ""
-        except Exception as e:
-            logger.warning(f"teraboxdl.site API failed: {e}")
-        return ""
-
-    result = await asyncio.to_thread(_worker_tdl_direct)
-    if result:
-        logger.info(f"Worker direct link obtained: {result[:60]}...")
-    return result
 
 
 async def _first_working_official(
