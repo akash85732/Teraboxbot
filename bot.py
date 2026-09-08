@@ -317,14 +317,30 @@ async def _check_member(client: Client, channel: str, user_id: int):
 
 
 def _fsub_channels() -> list:
-    """Config fallback ke saath saare force-join channels ki list."""
-    fsubs = get_fsubs()
-    if fsubs:
-        return fsubs
+    """Saare force-join channels (DB + Config env) ki merged list.
+
+    DB aur FSUB_CHANNEL env var donno se channels merge kiye jaate hain, taaki
+    Render ke ephemeral filesystem par DB reset hone par bhi env se set kiya
+    hua channel enforce rahe. FSUB_CHANNEL comma-separated ho sakta hai.
+    Duplicates skip ho jaate hain.
+    """
+    merged: dict[str, dict] = {}
+    for ch in get_fsubs():
+        ident = str(ch.get("id") or "").lstrip("@")
+        if ident:
+            merged[ident] = {
+                "id": ident,
+                "title": str(ch.get("title") or ""),
+                "link": str(ch.get("link") or ""),
+            }
     cfg = getattr(Config, "FSUB_CHANNEL", "") or ""
-    if cfg:
-        return [{"id": str(cfg).lstrip("@"), "title": str(cfg), "link": ""}]
-    return []
+    for part in str(cfg).split(","):
+        part = part.strip().lstrip("@")
+        if not part:
+            continue
+        if part not in merged:
+            merged[part] = {"id": part, "title": part, "link": ""}
+    return list(merged.values())
 
 
 async def _check_all_member(client: Client, channels: list, user_id: int) -> bool:
