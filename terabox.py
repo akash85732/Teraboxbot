@@ -22,7 +22,7 @@ import time
 import logging
 import socket
 import asyncio
-from typing import Optional
+from typing import Optional, Coroutine
 from urllib.parse import urlparse, parse_qs, quote
 
 import aiohttp
@@ -167,44 +167,81 @@ async def get_file_info(link: str) -> Optional[dict]:
     # Since TeraBox started blocking datacenter downloads (official
     # /share/streaming & /share/download return errno -21 "no authentic" /
     # verify_v2 unless the exact logging-in session is re-used), the only
-    # candidate that reliably downloads is the worker direct link. Try it
-    # first so videos never land on dead official candidates.
-    try:
-        worker_res = await _worker_teraboxdl_site(link)
-        if worker_res:
-            return worker_res
-    except Exception as e:
-        logger.warning(f"teraboxdl.site (primary) failed: {e}")
+    # candidate that reliably downloads is the worker direct link.
+    #
+    # All resolvers run IN PARALLEL with independent hard caps. Sequential
+    # resolving could take 60-150s worst case (teraboxdl 3x20s backoff, then
+    # 5 official mirrors, then the third-party worker) while bot.py cuts the
+    # whole call at 60s - on hosts like Render that TimeoutError surfaced as an
+    # instant "File mil nahi payi" with no filename. Racing keeps the total
+    # resolve bounded by the slowest cap (~25s) instead of the sum.
+    return await _race_resolvers([
+        ("tdl", _worker_teraboxdl_site(link), 25),
+        ("official", _first_working_official(apis, surl_id, cookie_header), 25),
+        ("mn", _try_third_party_api(link), 15),
+    ])
 
-    # SECONDARY: Official TeraBox APIs (session + jsToken + optional cookie).
-    official_res = await _first_working_official(
-        apis, surl_id, cookie_header
-    )
-    if official_res:
-        # Boost with instant worker direct link when available - gives Telegram
-        # a URL it can fetch itself (near-instant delivery) and gives the
-        # downloader the fastest CDN candidate.
+
+async def _race_resolvers(
+    runners: list[tuple[str, Coroutine, float]]
+) -> Optional[dict]:
+    """Race several resolvers concurrently and return the first success.
+
+    Runners is a list of (name, coroutine, cap_seconds). Each runner is
+    cancelled once its cap fires (so a hanging backend can never stall the
+    whole resolve). The result is kept in runner order (priority = list order)
+    and the first successful one wins while the rest are cancelled.
+    """
+
+    def _norm(res):
+        if isinstance(res, dict):
+            # A {"error": ...} payload means "definitely no file" - let the
+            # other racers keep trying.
+            if res.get("error") and not res.get("filename"):
+                return None
+            return res
+        if isinstance(res, str):
+            # _get_worker_direct returns "" when it fails.
+            return res if res else None
+        return None
+
+    async def _capped(name: str, coro: Coroutine, cap: float):
         try:
-            worker_dlink = await _get_worker_direct(link)
-            if worker_dlink:
-                current = official_res.get("download_link") or ""
-                official_res["alt_links"] = [
-                    l for l in ([current] + list(official_res.get("alt_links", [])))
-                    if l and l != worker_dlink
-                ]
-                official_res["download_link"] = worker_dlink
+            return _norm(await asyncio.wait_for(coro, timeout=cap))
+        except asyncio.TimeoutError:
+            logger.warning(f"resolver '{name}' capped at {cap}s")
+            return None
         except Exception as e:
-            logger.warning(f"Worker direct link boost failed: {e}")
-        return official_res
+            logger.warning(f"resolver '{name}' failed: {e}")
+            return None
 
-    # FALLBACK: Third-party worker APIs (last resort)
-    try:
-        third_party_res = await _try_third_party_api(link)
-        if third_party_res:
-            return third_party_res
-    except Exception as e:
-        logger.warning(f"Third party APIs failed: {e}")
+    tasks: dict[str, asyncio.Task] = {}
+    for name, coro, cap in runners:
+        tasks[name] = asyncio.ensure_future(_capped(name, coro, cap))
 
+    pending = set(tasks.values())
+    results: dict[str, object] = {}
+    priority = [r[0] for r in runners]
+
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for t in done:
+            name = next((n for n, task in tasks.items() if task is t), None)
+            if name:
+                try:
+                    results[name] = t.result()
+                except Exception:
+                    results[name] = None
+        for name in priority:
+            if results.get(name):
+                for tt in pending:
+                    tt.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                return results[name]
+
+    for name in priority:
+        if results.get(name):
+            return results[name]
     return {"error": "Failed to fetch file info from TeraBox."}
 
 
@@ -488,7 +525,7 @@ def _worker_teraboxdl_site_sync(link: str) -> Optional[dict]:
             r = s.post(
                 "https://api.teraboxdl.site/api/test",
                 json={"url": url},
-                timeout=20,
+                timeout=15,
             )
             if r.status_code != 200:
                 raise RuntimeError(f"HTTP {r.status_code}")
@@ -538,7 +575,7 @@ def _worker_teraboxdl_site_sync(link: str) -> Optional[dict]:
                 f"teraboxdl.site attempt {attempt}/3 failed: {e}"
             )
             if attempt < 3:
-                time.sleep(1.5 * attempt)
+                time.sleep(0.5 * attempt)
     return None
 
 
