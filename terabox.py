@@ -19,11 +19,13 @@ Flow (no user-facing cookie system):
 import re
 import json
 import time
+import random
+import hashlib
 import logging
 import socket
 import asyncio
 from typing import Optional
-from urllib.parse import urlparse, parse_qs, quote
+from urllib.parse import urlparse, parse_qs, quote, urlencode, unquote
 
 import aiohttp
 import requests
@@ -111,6 +113,43 @@ def _extract_js_token(html: str) -> str:
         m = pattern.search(html)
         if m and m.group(1):
             return m.group(1)
+    return ""
+
+
+def _dp_logid() -> str:
+    """TeraBox-format dp-logid header used by /api/shorturlinfo & /share/streaming."""
+    ts = str(int(time.time()))[-3:][::-1]
+    raw = "0302" + ts + str(random.randint(1000000, 9999999))
+    return raw + "-" + hashlib.md5(raw.encode()).hexdigest().upper()[:8] + "-77"
+
+
+def _wap_js_token(s: requests.Session, base_url: str, surl_id: str) -> str:
+    """Extract jsToken via the mobile /wap/share/filelist endpoint.
+
+    Works even from datacenter IPs where the desktop share page is replaced
+    by a bot-check. Falls back to trying both the stripped and raw short id.
+    """
+    short = surl_id[1:] if surl_id[:1] in ("1", "0") and len(surl_id) > 8 else surl_id
+    variants = list(dict.fromkeys([short, surl_id]))
+    for vs in variants:
+        try:
+            r = s.get(
+                f"{base_url}/wap/share/filelist?surl={vs}&clearCache=1",
+                timeout=15,
+            )
+            if r.status_code != 200:
+                continue
+            html = r.text
+            tok = _extract_js_token(html)
+            if tok:
+                return tok
+            m = re.search(r"eval\(decodeURIComponent\(`([^`]+)`\)\)", html)
+            if m:
+                tok = _extract_js_token(unquote(m.group(1)))
+                if tok:
+                    return tok
+        except Exception:
+            continue
     return ""
 
 
@@ -257,45 +296,46 @@ def _fetch_official_sync(
     base_url: str, surl_id: str, cookie_header: str = ""
 ) -> Optional[dict]:
     """
-    Session-based extraction using requests Session to transparently follow cross-domain redirects.
+    Session-based extraction using requests Session.
+
+    Uses the mobile /wap/share/filelist endpoint for jsToken (works even from
+    datacenter IPs), then calls /api/shorturlinfo with full params and builds
+    ordered download candidates (HLS stream first, then direct download links).
     """
     headers = get_headers()
     s = requests.Session()
     s.headers.update(headers)
-    s.verify = False
+    s.headers.pop("Origin", None)
 
     if cookie_header:
         s.headers["Cookie"] = cookie_header
 
-    # Step 1: Visit the share page to get browser-like session + jsToken
-    final_url = f"{base_url}/s/{surl_id}"
     real_base = base_url
-    js_token = ""
-
-    try:
-        r = s.get(f"{base_url}/s/{surl_id}", timeout=15)
-        if r.status_code == 200:
-            js_token = _extract_js_token(r.text)
-            final_url = r.url
-            parsed = urlparse(final_url)
-            real_base = f"{parsed.scheme}://{parsed.netloc}"
-    except Exception as e:
-        logger.warning(f"Share page fetch failed for {base_url}: {e}")
-        return None
-
+    js_token = _wap_js_token(s, base_url, surl_id)
     if not js_token:
-        logger.warning(f"No jsToken for {base_url} - trying shorturlinfo without it")
+        logger.warning(f"No wap jsToken for {base_url} - trying shorturlinfo without it")
     else:
-        logger.info(f"jsToken obtained for {base_url}")
+        logger.info(f"wap jsToken obtained for {base_url}")
 
-    # Step 2: shorturlinfo (official API) - jsToken optional, older API works without it
-    shorturl_param = quote(surl_id, safe="")
-    info_url = f"{real_base}/api/shorturlinfo?shorturl={shorturl_param}&root=1&p=1"
-    if js_token:
-        info_url += f"&jsToken={js_token}"
-    api_headers = dict(headers)
-    api_headers["Referer"] = final_url
-    api_headers["Origin"] = real_base
+    # Step 2: shorturlinfo (official API). Full shorturl (leading digit) + dp-logid required.
+    params = {
+        "app_id": "250528",
+        "shorturl": f"1{surl_id}" if not surl_id.startswith("1") else surl_id,
+        "root": "1",
+        "web": "1",
+        "channel": "dubox",
+        "clienttype": "0",
+        "jsToken": js_token,
+        "t": str(int(time.time())),
+        "dp-logid": _dp_logid(),
+    }
+    info_url = f"{real_base}/api/shorturlinfo?" + urlencode(params)
+    api_headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": f"{real_base}/",
+        "User-Agent": headers["User-Agent"],
+    }
     if cookie_header:
         api_headers["Cookie"] = cookie_header
 
@@ -315,6 +355,7 @@ def _fetch_official_sync(
 
     errno = data.get("errno", -1)
     if errno not in (0, -7):
+        logger.warning(f"shorturlinfo errno={errno} for {real_base}")
         return None
 
     file_list = data.get("list", [])
@@ -363,10 +404,10 @@ def _fetch_official_sync(
         share_dlink = (
             f"{real_base}/share/download"
             f"?app_id=250528&web=1&channel=dubox&clienttype=0"
-            f"&shorturl={surl_id}"
+            f"&shorturl={quote(surl_id, safe='')}"
             f"&shareid={shareid}"
             f"&uk={uk}"
-            f"&fid_list=%5B{fs_id}%5D"
+            f"&fid_list={quote('[' + str(fs_id) + ']', safe='')}"
         )
         if sign_qs:
             share_dlink += f"&{sign_qs}"
@@ -376,28 +417,38 @@ def _fetch_official_sync(
             candidate_links.append(share_dlink)
             seen.add(share_dlink)
 
-    raw_path = file_info.get("path", "")
     stream_link = ""
-    if fs_id and uk and shareid and raw_path and data.get("sign"):
-        for stream_type in (
-            "M3U8_AUTO_1080",
-            "M3U8_AUTO_720",
-            "M3U8_AUTO_480",
-        ):
-            stream_candidate = (
-                f"{real_base}/share/streaming"
-                f"?app_id=250528&channel=dubox&clienttype=0"
-                f"&type={stream_type}"
-                f"&path={quote(raw_path)}"
-                f"&uk={uk}"
-                f"&shareid={shareid}"
-                f"&fid={fs_id}"
-                f"&sign={data.get('sign')}"
-                f"&timestamp={data.get('timestamp')}"
+    if fs_id and uk and shareid:
+        sign = file_info.get("sign") or data.get("sign", "")
+        ts = file_info.get("timestamp") or data.get("timestamp")
+        for stream_type in ("M3U8_AUTO_480", "M3U8_AUTO_720", "M3U8_AUTO_1080"):
+            stream_candidate = f"{real_base}/share/streaming?" + urlencode({
+                "uk": str(uk),
+                "shareid": str(shareid),
+                "type": stream_type,
+                "fid": str(fs_id),
+                "sign": sign,
+                "timestamp": str(ts) if ts else "",
+                "jsToken": "",
+                "esl": "1",
+                "isplayer": "1",
+                "ehps": "1",
+                "clienttype": "0",
+                "app_id": "250528",
+                "web": "1",
+                "channel": "dubox",
+                "dp-logid": _dp_logid(),
+            })
+            stream_headers = dict(api_headers)
+            stream_headers["Referer"] = (
+                f"{real_base}/share/verify?shareid={shareid}&uk={uk}"
             )
             try:
-                s_resp = s.get(stream_candidate, headers=api_headers, timeout=5)
-                if s_resp.status_code == 200 and s_resp.text.strip().startswith("#EXTM3U"):
+                s_resp = s.get(stream_candidate, headers=stream_headers, timeout=6)
+                if (
+                    s_resp.status_code == 200
+                    and s_resp.text.strip().startswith("#EXTM3U")
+                ):
                     stream_link = stream_candidate
                     break
             except Exception:

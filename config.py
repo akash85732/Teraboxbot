@@ -40,6 +40,7 @@ class Config:
 
     # TeraBox API endpoints
     TERABOX_APIS = [
+        "https://dm.1024tera.com",
         "https://www.1024tera.com",
         "https://www.terabox.app",
         "https://www.terabox.com",
