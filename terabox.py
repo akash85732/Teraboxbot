@@ -37,6 +37,18 @@ from cookie import load_cookie_header
 
 logger = logging.getLogger(__name__)
 
+# Resolve cache: shared across all users so a single resolved link never
+# re-hammers rate-limited hosts. Positive hits live 20 min, failures only 60s.
+_RESOLVE_CACHE: dict[str, tuple[float, Optional[dict]]] = {}
+_RESOLVE_CACHE_TTL = 20 * 60
+_NEG_CACHE_TTL = 60
+
+# teraboxdl.site 429 -> per-IP burst rate limit. After a 429 we cool down for a
+# bit (skip it entirely) so the shared Render egress IP gets un-banned instead
+# of being re-hammered on every message.
+_TERABOXDL_COOLDOWN_UNTIL = 0.0  # monotonic timestamp
+_TERABOXDL_COOLDOWN_SECS = 90.0
+
 # All known TeraBox domain patterns
 TERABOX_DOMAINS = [
     r"terabox[a-z0-9-]*\.[a-z]+",
@@ -177,13 +189,30 @@ async def get_file_info(link: str) -> Optional[dict]:
     Fetch file info from TeraBox including download candidates.
 
     Returns dict with: filename, size, thumbnail, download_link, alt_links,
-    is_dir, error. Or None on failure.
+    is_dir, error. Or None on failure. Results are cached per short-id so
+    repeated shares never hammer rate-limited resolvers.
     """
     surl_id = await _get_short_url_id(link)
     if not surl_id:
         logger.error(f"Could not extract surl from: {link}")
         return {"error": "Could not parse TeraBox short link URL."}
 
+    cached = _RESOLVE_CACHE.get(surl_id)
+    if cached:
+        ts, res = cached
+        is_err = bool(res.get("error"))
+        ttl = _NEG_CACHE_TTL if is_err else _RESOLVE_CACHE_TTL
+        if time.time() - ts < ttl:
+            logger.info(f"resolve cache hit for {surl_id} (error={is_err})")
+            return res
+
+    result = await _resolve_unwrapped(link, surl_id)
+    _RESOLVE_CACHE[surl_id] = (time.time(), result)
+    return result
+
+
+async def _resolve_unwrapped(link: str, surl_id: str) -> dict:
+    """Actual resolve logic (no caching)."""
     try:
         cookie_header = load_cookie_header()
     except Exception:
@@ -549,7 +578,15 @@ def _worker_teraboxdl_site_sync(link: str) -> Optional[dict]:
     """
     url = link if link.startswith("http") else f"https://{link}"
 
-    for attempt in range(1, 4):
+    global _TERABOXDL_COOLDOWN_UNTIL
+    if time.monotonic() < _TERABOXDL_COOLDOWN_UNTIL:
+        logger.warning(
+            f"teraboxdl.site on cooldown "
+            f"({int(_TERABOXDL_COOLDOWN_UNTIL - time.monotonic())}s left) - skipping"
+        )
+        return None
+
+    for attempt in range(1, 3):
         try:
             s = requests.Session()
             s.verify = False
@@ -558,6 +595,11 @@ def _worker_teraboxdl_site_sync(link: str) -> Optional[dict]:
                 json={"url": url},
                 timeout=20,
             )
+            if r.status_code == 429:
+                _TERABOXDL_COOLDOWN_UNTIL = (
+                    time.monotonic() + _TERABOXDL_COOLDOWN_SECS
+                )
+                raise RuntimeError("HTTP 429 rate-limited (cooldown set)")
             if r.status_code != 200:
                 raise RuntimeError(f"HTTP {r.status_code}")
             data = r.json()
@@ -603,9 +645,9 @@ def _worker_teraboxdl_site_sync(link: str) -> Optional[dict]:
             }
         except Exception as e:
             logger.warning(
-                f"teraboxdl.site attempt {attempt}/3 failed: {e}"
+                f"teraboxdl.site attempt {attempt}/2 failed: {e}"
             )
-            if attempt < 3:
+            if attempt < 2:
                 time.sleep(1.5 * attempt)
     return None
 
