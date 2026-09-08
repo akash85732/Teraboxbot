@@ -337,7 +337,14 @@ async def _download_stream(
 
         segments: dict[str, dict] = {}
         stale_rounds = 0
-        poll_limit = 80
+        # TeraBox /share/streaming har request par ek random, chhota window
+        # (5-6 segments) deta hai. Poori file pane ke liye bar-bar poll karke
+        # sab windows ki segments ko accumulate karna padta hai. Window jaldi
+        # shift na hone ki wajah se kuch poll same rahenge - isliye zyada
+        # patience (stale threshold) aur zyada attempts rakho taaki zyada se
+        # zyada segments mil sakein aur download atke na.
+        stale_limit = 20
+        poll_limit = 200
 
         for _ in range(poll_limit):
             try:
@@ -374,9 +381,9 @@ async def _download_stream(
                 stale_rounds = 0
             else:
                 stale_rounds += 1
-                if stale_rounds >= 8:
+                if stale_rounds >= stale_limit:
                     break
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.1)
 
         if not segments:
             return None, 0

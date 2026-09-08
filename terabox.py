@@ -258,6 +258,26 @@ async def _resolve_unwrapped(link: str, surl_id: str) -> dict:
         if official_res:
             break
     if official_res:
+        # Cookie session se metadata resolve ho gaya. Ab complete file download
+        # ke liye full-file candidate ko pehle rakho.
+        #
+        # TeraBox datacenter IP se /share/download => verify_v2 (errno 400310),
+        # aur /share/streaming => sirf chhota random window (partial file) deta
+        # hai, isliye vo alag se atak jaata hai. Worker direct link (dl-worker)
+        # poora file deta hai, to usko first candidate banao; streaming last
+        # fallback rakh do.
+        session_links = [
+            official_res.get("download_link") or "",
+        ] + list(official_res.get("alt_links") or [])
+        worker_dlink = await _get_worker_direct(link)
+        ordered = []
+        if worker_dlink:
+            ordered.append(worker_dlink)
+        for l in session_links:
+            if l and l not in ordered:
+                ordered.append(l)
+        official_res["download_link"] = ordered[0] if ordered else ""
+        official_res["alt_links"] = ordered[1:]
         return official_res
 
     # SECONDARY: teraboxdl.site worker -> cookie-free direct dl-worker link.
@@ -279,6 +299,49 @@ async def _resolve_unwrapped(link: str, surl_id: str) -> dict:
         logger.warning(f"Third party APIs failed: {e}")
 
     return {"error": "Failed to fetch file info from TeraBox."}
+
+
+async def _get_worker_direct(link: str) -> str:
+    """
+    Fetch an instant cookie-free worker full-file direct link.
+
+    Cookie/session (/share/download, /share/streaming) se datacenter IP par
+    poori file nahi milti - ya to verify_v2 aata hai, ya sirf partial HLS
+    window. dl-worker direct link poora original file deta hai, isliye ise
+    candidate list me sabse pehle rakha jaata hai taaki download atke na.
+
+    Worker down/rate-limited hone par jaldi (6s) fail ho jaata hai taaki
+    resolve 60s timeout ke andar hi rahe.
+    """
+    url = link if link.startswith("http") else f"https://{link}"
+    timeout = aiohttp.ClientTimeout(total=6)
+    headers = get_headers()
+    try:
+        connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
+        async with aiohttp.ClientSession(
+            timeout=timeout, connector=connector
+        ) as session:
+            async with session.post(
+                "https://api.teraboxdl.site/api/test", json={"url": url}
+            ) as resp:
+                if resp.status != 200:
+                    return ""
+                data = await resp.json(content_type=None)
+                if data.get("status") != "success" or "data" not in data:
+                    return ""
+                items = data["data"].get("list") or []
+                if not items:
+                    return ""
+                item = items[0]
+                return (
+                    item.get("direct_link")
+                    or item.get("stream_download_url")
+                    or item.get("download_link")
+                    or ""
+                )
+    except Exception as e:
+        logger.warning(f"teraboxdl.site worker direct link failed: {e}")
+    return ""
 
 
 async def _first_working_official(
@@ -460,12 +523,19 @@ def _fetch_official_sync(
             except Exception:
                 continue
 
+    # Candidate order: direct full-file links FIRST, HLS streaming LAST.
+    #
+    # /share/streaming only ever returns a short random window of segments per
+    # poll, so it can NEVER reconstruct a full multi-hundred-MB file - it stalls
+    # at ~a few dozen segments. /share/download (and the raw dlink) deliver the
+    # complete file, so they must be tried first. Streaming stays as the final
+    # fallback in case the direct links demand browser verification.
     ordered: list[str] = []
-    if stream_link:
-        ordered.append(stream_link)
     for link in candidate_links:
         if link not in ordered:
             ordered.append(link)
+    if stream_link and stream_link not in ordered:
+        ordered.append(stream_link)
 
     download_link = ordered[0] if ordered else ""
     alt_links = ordered[1:] if len(ordered) > 1 else []
