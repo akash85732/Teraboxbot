@@ -105,6 +105,61 @@ def get_headers() -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Resolve cache + per-host backoff.
+#
+# teraboxdl.site rate-limits aggressively per IP (HTTP 429). Render's egress IP
+# is shared by every request, so priorities are:
+#   1. Cache resolved results per share URL (a viral link is re-requested by
+#      many users in seconds - skip the API entirely for them).
+#   2. Never hammer a host that just said 429/5xx - pin it into backoff and
+#      skip further calls until it cools down.
+#   3. Keep per-link retries to a minimum so one resolve never fires a burst of
+#      API calls (which is exactly what triggers the 429).
+# ---------------------------------------------------------------------------
+_RESOLVE_CACHE: dict[str, tuple[float, dict]] = {}
+_RESOLVE_CACHE_TTL = 240          # positive (successful) entries
+_RESOLVE_NEG_TTL = 20             # negative (error) entries
+_RESOLVE_CACHE_MAX = 512
+
+_BACKOFF: dict[str, float] = {}
+_BACKOFF_429 = 35
+_BACKOFF_5XX = 12
+
+
+def _host_skipping(host: str) -> bool:
+    """True if this host is currently cooling down after a rate-limit error."""
+    return time.time() < _BACKOFF.get(host, 0)
+
+
+def _mark_backoff(host: str, seconds: float) -> None:
+    until = time.time() + seconds
+    if _BACKOFF.get(host, 0) < until:
+        _BACKOFF[host] = until
+    logger.warning(f"{host} marked down for {seconds:.0f}s")
+
+
+def _cache_get(link: str):
+    """Return a fresh cached resolve for this link, or None."""
+    item = _RESOLVE_CACHE.get(link)
+    if not item:
+        return None
+    exp, val = item
+    if time.time() < exp:
+        return val
+    _RESOLVE_CACHE.pop(link, None)
+    return None
+
+
+def _cache_put(link: str, val: dict, ttl: float) -> None:
+    if len(_RESOLVE_CACHE) >= _RESOLVE_CACHE_MAX:
+        try:
+            _RESOLVE_CACHE.pop(next(iter(_RESOLVE_CACHE)))
+        except Exception:
+            pass
+    _RESOLVE_CACHE[link] = (time.time() + ttl, val)
+
+
 def _extract_js_token(html: str) -> str:
     """Extract jsToken from the share page HTML (percent-encoded or decoded)."""
     for pattern in (JS_TOKEN_RE, JS_TOKEN_RE_ALT, JS_TOKEN_RE_RAW, JS_TOKEN_RE_2, JS_TOKEN_RE_3):
@@ -145,6 +200,11 @@ async def get_file_info(link: str) -> Optional[dict]:
         logger.error(f"Could not extract surl from: {link}")
         return {"error": "Could not parse TeraBox short link URL."}
 
+    cached = _cache_get(link)
+    if cached:
+        logger.info(f"resolve cache hit for {link[:60]}")
+        return cached
+
     try:
         cookie_header = load_cookie_header()
     except Exception:
@@ -175,11 +235,20 @@ async def get_file_info(link: str) -> Optional[dict]:
     # whole call at 60s - on hosts like Render that TimeoutError surfaced as an
     # instant "File mil nahi payi" with no filename. Racing keeps the total
     # resolve bounded by the slowest cap (~25s) instead of the sum.
-    return await _race_resolvers([
+    result = await _race_resolvers([
         ("tdl", _worker_teraboxdl_site(link), 25),
         ("official", _first_working_official(apis, surl_id, cookie_header), 25),
         ("mn", _try_third_party_api(link), 15),
     ])
+
+    if isinstance(result, dict):
+        if result.get("filename"):
+            _cache_put(link, result, _RESOLVE_CACHE_TTL)
+        else:
+            # short negative cache - stops a repeated failing link from
+            # hammering teraboxdl.site and immediately re-tripping the 429
+            _cache_put(link, result, _RESOLVE_NEG_TTL)
+    return result
 
 
 async def _race_resolvers(
@@ -518,15 +587,28 @@ def _worker_teraboxdl_site_sync(link: str) -> Optional[dict]:
     """
     url = link if link.startswith("http") else f"https://{link}"
 
-    for attempt in range(1, 4):
+    host = "api.teraboxdl.site"
+    if _host_skipping(host):
+        logger.info(f"{host} is cooling down - skipping")
+        return None
+
+    for attempt in range(1, 3):
         try:
             s = requests.Session()
             s.verify = False
             r = s.post(
-                "https://api.teraboxdl.site/api/test",
+                f"https://{host}/api/test",
                 json={"url": url},
                 timeout=15,
             )
+            if r.status_code == 429:
+                # rate limited - stop hammering and pin the host into backoff
+                # for a while; other sources (cache, official, mn) take over.
+                _mark_backoff(host, _BACKOFF_429)
+                raise RuntimeError(f"HTTP 429 rate-limited, backing off {_BACKOFF_429}s")
+            if 500 <= r.status_code < 600:
+                _mark_backoff(host, _BACKOFF_5XX)
+                raise RuntimeError(f"HTTP {r.status_code}")
             if r.status_code != 200:
                 raise RuntimeError(f"HTTP {r.status_code}")
             data = r.json()
@@ -572,10 +654,10 @@ def _worker_teraboxdl_site_sync(link: str) -> Optional[dict]:
             }
         except Exception as e:
             logger.warning(
-                f"teraboxdl.site attempt {attempt}/3 failed: {e}"
+                f"teraboxdl.site attempt {attempt}/2 failed: {e}"
             )
-            if attempt < 3:
-                time.sleep(0.5 * attempt)
+            if attempt < 2:
+                time.sleep(0.6 * attempt)
     return None
 
 
