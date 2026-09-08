@@ -467,24 +467,70 @@ async def handle_link(client: Client, message: Message, link: str):
                 pass
 
         task_id = str(chat_id)
-        async with dl_sem:
-            filepath = await downloader.download_file(
-                url=file_info.get("download_link"),
-                filename=file_name,
-                file_size=file_size,
-                task_id=task_id,
-                alt_urls=file_info.get("alt_links") or [],
-                progress_callback=progress,
-            )
 
-        # guard: verify_v2 / errno JSON kabhi upload nahi karenge
-        with open(filepath, "rb") as f:
-            head = f.read(4096).lstrip()
-        if head[:1] == b"{":
-            raise DownloadError(
-                "TeraBox verification required (verify_v2) - file abhi nahi mili. "
-                "Thodi der baad try karo."
-            )
+        # Auto-retry: dl-worker tokens expire and the resolver can hiccup, so a
+        # failed attempt re-resolves a fresh link and tries again (max 3). This
+        # keeps videos flowing even when a source is down for a few seconds.
+        _MAX_DL_ATTEMPTS = 3
+        attempt = 0
+        last_dl_err: Optional[DownloadError] = None
+        while attempt < _MAX_DL_ATTEMPTS:
+            attempt += 1
+            if _cancel_req.get(user_id):
+                raise DownloadCancelled()
+            if attempt > 1:
+                await _edit_status(
+                    client, chat_id, status_msg.id,
+                    f"🔄 <b>File abhi nahi mili, dobara try ho raha hai ({attempt}/3)...</b>",
+                )
+                try:
+                    file_info = await asyncio.wait_for(
+                        asyncio.to_thread(_resolve_sync, link), timeout=60
+                    )
+                except Exception:
+                    file_info = {}
+                if file_info.get("filename"):
+                    file_name = file_info.get("filename")
+                    file_size = int(file_info.get("size") or file_size or 0)
+                    caption = build_caption(file_name, file_size)
+            async with dl_sem:
+                try:
+                    filepath = await downloader.download_file(
+                        url=file_info.get("download_link"),
+                        filename=file_name,
+                        file_size=file_size,
+                        task_id=task_id,
+                        alt_urls=file_info.get("alt_links") or [],
+                        progress_callback=progress,
+                    )
+                except DownloadError as e:
+                    last_dl_err = e
+                    if "cancell" in str(e).lower():
+                        raise
+                    logger.warning(
+                        f"Download attempt {attempt}/{_MAX_DL_ATTEMPTS} failed "
+                        f"for user {user_id}: {e}"
+                    )
+                    filepath = None
+                    await asyncio.sleep(2)
+                    continue
+
+            # guard: verify_v2 / errno JSON kabhi upload nahi karenge
+            with open(filepath, "rb") as f:
+                head = f.read(4096).lstrip()
+            if head[:1] == b"{":
+                _cleanup_file(filepath)
+                filepath = None
+                last_dl_err = DownloadError(
+                    "TeraBox verification required (verify_v2) - file abhi nahi mili. "
+                    "Thodi der baad try karo."
+                )
+                logger.warning(f"verify_v2 guard hit on attempt {attempt}")
+                continue
+            break
+
+        if not filepath:
+            raise last_dl_err or DownloadError("Download failed on all attempts.")
 
         await _edit_status(
             client, chat_id, status_msg.id,

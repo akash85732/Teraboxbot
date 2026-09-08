@@ -18,6 +18,7 @@ Flow (no user-facing cookie system):
 
 import re
 import json
+import time
 import logging
 import socket
 import asyncio
@@ -215,25 +216,16 @@ async def _get_worker_direct(link: str) -> str:
     no cookies, so Telegram's own servers can download them directly - enabling
     near-instant delivery with no VPS-side re-upload at all.
 
-    NOTE: dl-worker.teraboxdl.site does NOT support HTTP Range requests (returns
-    500), so large files are fetched over a single stream - the downloader
-    already falls back to that automatically.
+    NOTE: dl-worker.teraboxdl.site is a Cloudflare worker - Range support is
+    flaky (sometimes 206, sometimes 500). The downloader probes safely and
+    falls back to a single stream automatically.
     """
 
     def _worker_tdl_direct() -> str:
         try:
-            s = requests.Session()
-            s.verify = False
-            r = s.post(
-                "https://api.teraboxdl.site/api/test",
-                json={"url": link},
-                timeout=20,
-            )
-            data = r.json()
-            if data.get("status") == "success" and "data" in data and "list" in data["data"]:
-                items = data["data"]["list"]
-                if items:
-                    return items[0].get("direct_link") or items[0].get("stream_download_url") or ""
+            res = _worker_teraboxdl_site_sync(link)
+            if res:
+                return res.get("download_link", "") or ""
         except Exception as e:
             logger.warning(f"teraboxdl.site API failed: {e}")
         return ""
@@ -493,45 +485,78 @@ async def _try_third_party_api(link: str) -> Optional[dict]:
 
 
 def _worker_teraboxdl_site_sync(link: str) -> Optional[dict]:
-    """Query the teraboxdl.site POST API (returns file info + cookie-free direct link)."""
-    try:
-        url = link if link.startswith("http") else f"https://{link}"
-        s = requests.Session()
-        s.verify = False
-        r = s.post(
-            "https://api.teraboxdl.site/api/test",
-            json={"url": url},
-            timeout=15,
-        )
-        data = r.json()
-        if data.get("status") != "success" or "data" not in data:
-            return None
-        inner = data["data"]
-        file_list = inner.get("list") or []
-        if not file_list:
-            return None
-        item = file_list[0]
-        filename = item.get("server_filename") or item.get("filename") or "terabox_video.mp4"
-        size = int(item.get("size", item.get("size_bytes", 0)) or 0)
-        dlink = (
-            item.get("direct_link")
-            or item.get("stream_download_url")
-            or item.get("download_link")
-            or ""
-        )
-        if not dlink:
-            return None
-        return {
-            "filename": filename,
-            "size": size,
-            "thumbnail": "",
-            "download_link": dlink,
-            "alt_links": [],
-            "is_dir": False,
-        }
-    except Exception as e:
-        logger.warning(f"teraboxdl.site API failed: {e}")
-        return None
+    """Query the teraboxdl.site POST API (returns file info + cookie-free direct link).
+
+    The response exposes three independent download paths for the exact same
+    file:
+      1. direct_link         - full original quality (dl-worker CDN)
+      2. stream_download_url - transcoded MP4 served by api.teraboxdl.site
+      3. stream_url          - HLS playlist (teraboxdl proxied segments)
+    All three are returned as ordered candidates so the downloader auto-falls
+    back if one host dies. The API is retried a few times because it 500s /
+    read-time-outs sporadically.
+    """
+    url = link if link.startswith("http") else f"https://{link}"
+
+    for attempt in range(1, 4):
+        try:
+            s = requests.Session()
+            s.verify = False
+            r = s.post(
+                "https://api.teraboxdl.site/api/test",
+                json={"url": url},
+                timeout=20,
+            )
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            data = r.json()
+            if data.get("status") != "success" or "data" not in data:
+                raise RuntimeError(data.get("message") or "status != success")
+            inner = data["data"]
+            file_list = inner.get("list") or []
+            if not file_list:
+                raise RuntimeError("empty list")
+            item = file_list[0]
+            filename = item.get("server_filename") or item.get("filename") or "terabox_video.mp4"
+            size = int(item.get("size", item.get("size_bytes", 0)) or 0)
+            is_dir = str(item.get("isdir", "0")) == "1"
+            if is_dir:
+                return None
+
+            dlink = (
+                item.get("direct_link")
+                or item.get("stream_download_url")
+                or item.get("download_link")
+                or ""
+            )
+            if not dlink:
+                raise RuntimeError("no direct link in response")
+
+            alts: list[str] = []
+            for cand in (
+                item.get("stream_download_url", ""),
+                item.get("stream_url", ""),
+                item.get("download_link", ""),
+            ):
+                if cand and cand != dlink and cand not in alts:
+                    alts.append(cand)
+
+            thumbnail = (item.get("thumbs") or {}).get("url3", "") or ""
+            return {
+                "filename": filename,
+                "size": size,
+                "thumbnail": thumbnail,
+                "download_link": dlink,
+                "alt_links": alts,
+                "is_dir": False,
+            }
+        except Exception as e:
+            logger.warning(
+                f"teraboxdl.site attempt {attempt}/3 failed: {e}"
+            )
+            if attempt < 3:
+                time.sleep(1.5 * attempt)
+    return None
 
 
 async def _worker_teraboxdl_site(link: str) -> Optional[dict]:
