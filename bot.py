@@ -502,10 +502,7 @@ async def handle_link(client: Client, message: Message, link: str, status_msg=No
                     InlineKeyboardButton("▶️ Watch Online", url=player_url)
                 ])
 
-        if download_link:
-            buttons.append([
-                InlineKeyboardButton("⚡ Direct Link", url=download_link)
-            ])
+
 
         buttons.append([
             InlineKeyboardButton("📥 Upload to Telegram", callback_data=f"tg_dl:{cache_key}")
