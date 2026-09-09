@@ -962,6 +962,14 @@
         });
       } else {
         video.src = targetUrl;
+        video.load();
+        const p = video.play();
+        if (p !== undefined) {
+          p.then(hideLoader).catch(err => {
+            console.warn("Auto-play warning:", err);
+            hideLoader();
+          });
+        }
       }
     }
 

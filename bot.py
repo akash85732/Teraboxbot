@@ -109,19 +109,11 @@ def _get_player_url(stream_url: str, filename: str, filesize: int, alt_urls: lis
         else:
             base_url = "https://akash85732.github.io/Teraboxbot/player.html"
     
-    best_stream = stream_url
-    alts = alt_urls or []
-    for candidate in [stream_url] + alts:
-        if candidate and ("type=M3U8" in candidate or ".m3u8" in candidate or "/share/streaming" in candidate):
-            best_stream = candidate
-            break
-
-    query = f"?url={quote_plus(best_stream)}&title={quote_plus(filename)}&size={filesize}"
+    query = f"?url={quote_plus(stream_url)}&title={quote_plus(filename)}&size={filesize}"
     
-    if stream_url and stream_url != best_stream:
-        query += f"&alt={quote_plus(stream_url)}"
+    alts = alt_urls or []
     for a in alts:
-        if a and a != best_stream and a != stream_url:
+        if a and a != stream_url:
             query += f"&alt={quote_plus(a)}"
             break
 
