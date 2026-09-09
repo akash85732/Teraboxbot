@@ -507,11 +507,12 @@ async def handle_link(client: Client, message: Message, link: str):
 
     except Exception as e:
         logger.error("Resolve error: %s", e, exc_info=True)
-        text = "❌ <b>File mil nahi payi.</b>\n\nThodi der baad dobara try karo."
+        text = f"❌ <b>Error resolving link:</b>\n<code>{safe_html(str(e))}</code>"
         if status_msg:
             await _edit_status(client, chat_id, status_msg.id, text)
         else:
             await client.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+
 
 
 async def _download_and_upload_to_tg(
