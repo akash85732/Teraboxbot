@@ -923,7 +923,7 @@
         currentHls = null;
       }
 
-      const isM3U8 = targetUrl.includes('.m3u8') || targetUrl.includes('type=M3U8') || targetUrl.includes('get_m3u8_stream_fast') || targetUrl.includes('/share/streaming');
+      const isM3U8 = targetUrl.includes('.m3u8') || targetUrl.includes('type=M3U8');
 
       if (isM3U8 && Hls.isSupported()) {
         currentHls = new Hls({

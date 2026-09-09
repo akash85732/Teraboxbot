@@ -663,12 +663,11 @@ def _worker_teraboxdl_site_sync(link: str) -> Optional[dict]:
             if is_dir:
                 return None
 
-            fast_m3u8 = item.get("stream_url") or ""
             dlink = (
-                fast_m3u8
+                item.get("direct_link")
                 or item.get("stream_download_url")
-                or item.get("direct_link")
                 or item.get("download_link")
+                or item.get("stream_url")
                 or ""
             )
             if not dlink:
@@ -677,9 +676,8 @@ def _worker_teraboxdl_site_sync(link: str) -> Optional[dict]:
             alts: list[str] = []
             for cand in (
                 item.get("stream_download_url", ""),
-                item.get("direct_link", ""),
-                item.get("download_link", ""),
                 item.get("stream_url", ""),
+                item.get("download_link", ""),
             ):
                 if cand and cand != dlink and cand not in alts:
                     alts.append(cand)
