@@ -1753,14 +1753,16 @@ def start():
     logger.info("🚀 Starting TeraBox Bot (Pyrogram / MTProto)...")
     threading.Thread(target=_start_health_server, daemon=True).start()
 
-    @app.on_raw_update()
-    async def _kickstart(client, update, users, chats):
-        if not hasattr(_kickstart, "_scheduled"):
-            _kickstart._scheduled = True
-            asyncio.ensure_future(_self_ping())
+    async def _main():
+        await app.start()
+        asyncio.create_task(_self_ping())
+        logger.info("Bot started and ready!")
+        from pyrogram import idle
+        await idle()
+        await app.stop()
 
     try:
-        app.run()
+        app.run(_main())
     except KeyboardInterrupt:
         pass
 
