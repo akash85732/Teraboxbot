@@ -41,6 +41,7 @@ from pyrogram.types import (
 )
 
 from config import Config
+from terabox import get_file_info
 from downloader import downloader, DownloadError, _cleanup_file
 from db import (
     add_fsub,
@@ -483,8 +484,7 @@ async def handle_link(client: Client, message: Message, link: str, status_msg=No
 
     try:
         file_info = await asyncio.wait_for(
-
-            asyncio.to_thread(_resolve_sync, link), timeout=60
+            get_file_info(link), timeout=60
         )
         file_name = file_info.get("filename") or ""
         file_size = int(file_info.get("size") or file_info.get("file_size") or 0)
