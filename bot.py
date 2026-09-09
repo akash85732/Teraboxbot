@@ -76,13 +76,14 @@ logger = logging.getLogger("terabox_bot")
 
 # ---------------------------------------------------------------- constants
 LINK_RE = re.compile(
-    r"(?:https?://)?(?:www\d*\.)?"
+    r"https?://(?:[a-zA-Z0-9-]+\.)*"
     r"(?:teraboxapp|terabox|1024terabox|1024tera|terasharefile|terafileshare|terashare|"
-    r"4funbox|mirrobox|nephobox|freeterabox)"
+    r"4funbox|mirrobox|nephobox|freeterabox|flexcom)"
     r"\.(?:com|app|site|in|net|org|top|vip)"
-    r"/s/1[\w-]+",
+    r"/(?:s/[^\s>]+|sharing/link\?surl=[^\s>]+)",
     re.IGNORECASE,
 )
+
 
 VIDEO_EXTENSIONS = {
     "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts",
@@ -261,10 +262,15 @@ def build_caption(filename: str, size) -> str:
 
 
 def extract_link(text: str) -> str:
+    from terabox import extract_terabox_links
+    links = extract_terabox_links(text or "")
+    if links:
+        return links[0]
     m = LINK_RE.search(text or "")
-    if not m:
-        return ""
-    return m.group(0)
+    if m:
+        return m.group(0)
+    return ""
+
 
 
 def _can_use(user_id: int) -> bool:
@@ -470,16 +476,16 @@ async def handle_link(client: Client, message: Message, link: str):
             player_url = _get_player_url(download_link, file_name, file_size)
             if player_url.startswith("https://"):
                 buttons.append([
-                    InlineKeyboardButton("🎬 Watch Online (Web App)", web_app=WebAppInfo(url=player_url))
+                    InlineKeyboardButton("▶️ Watch Online (Web App)", web_app=WebAppInfo(url=player_url))
                 ])
             else:
                 buttons.append([
-                    InlineKeyboardButton("🎬 Watch Online", url=player_url)
+                    InlineKeyboardButton("▶️ Watch Online", url=player_url)
                 ])
 
         if download_link:
             buttons.append([
-                InlineKeyboardButton("🚀 Fast Direct Download", url=download_link)
+                InlineKeyboardButton("⚡ Direct Link", url=download_link)
             ])
 
         buttons.append([
@@ -487,14 +493,11 @@ async def handle_link(client: Client, message: Message, link: str):
         ])
 
         msg_text = (
-            f"✨ <b>{safe_html(file_name)}</b>\n\n"
+            f"🎬 <b>{safe_html(file_name)}</b>\n\n"
             f"📦 <b>Size:</b> {format_size(file_size)}\n"
-            f"⚡ <b>Status:</b> Direct Link Ready!\n\n"
-            f"<i>Niche diye option me se choose karein:</i>\n"
-            f"• <b>Watch Online:</b> 0 MB Server Data (Telegram me chalega)\n"
-            f"• <b>Fast Download:</b> Direct High Speed Download\n"
-            f"• <b>Upload to Telegram:</b> Bot Telegram chat me bhejega"
+            f"⚡ <b>Status:</b> Stream Ready"
         )
+
 
         await _edit_status(
             client, chat_id, status_msg.id,
@@ -1089,7 +1092,12 @@ async def on_private(client: Client, message: Message):
         return
     link = extract_link(message.text)
     if not link:
+        await message.reply_text(
+            "⚠️ <b>Invalid Link</b>\n\nKripya valid TeraBox video link bhejein.",
+            parse_mode=ParseMode.HTML,
+        )
         return
+
     await handle_link(client, message, link)
 
 

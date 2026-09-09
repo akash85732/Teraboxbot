@@ -3,388 +3,635 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>TeraBox Stream Player</title>
-  
+  <title>TeraBox Ultra Stream Player</title>
+
   <!-- Telegram WebApp SDK -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  
-  <!-- Google Fonts & Icons -->
+
+  <!-- Google Fonts & FontAwesome -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-  
+
   <!-- Plyr Video Player CSS -->
   <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css" />
 
   <style>
     :root {
-      --bg-primary: #0f172a;
-      --bg-card: rgba(30, 41, 59, 0.7);
-      --accent: #3b82f6;
-      --accent-hover: #2563eb;
-      --accent-glow: rgba(59, 130, 246, 0.4);
+      --bg-dark: #070913;
+      --bg-card: rgba(15, 23, 42, 0.65);
+      --bg-card-hover: rgba(30, 41, 59, 0.8);
+      --border-glass: rgba(255, 255, 255, 0.08);
+      --border-glow: rgba(99, 102, 241, 0.4);
+      --accent-primary: #6366f1;
+      --accent-secondary: #06b6d4;
+      --accent-gradient: linear-gradient(135deg, #6366f1 0%, #06b6d4 100%);
+      --accent-glow: rgba(99, 102, 241, 0.35);
       --text-main: #f8fafc;
       --text-muted: #94a3b8;
-      --border-color: rgba(255, 255, 255, 0.1);
-      --plyr-color-main: #3b82f6;
+      --text-dim: #64748b;
+      --plyr-color-main: #6366f1;
+      --radius-xl: 20px;
+      --radius-lg: 14px;
+      --radius-md: 10px;
     }
 
     * {
       box-sizing: border-box;
       margin: 0;
       padding: 0;
+      -webkit-tap-highlight-color: transparent;
     }
 
     body {
-      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
-      background: radial-gradient(circle at top, #1e293b 0%, #0f172a 100%);
+      font-family: 'Outfit', 'Inter', -apple-system, sans-serif;
+      background-color: var(--bg-dark);
       color: var(--text-main);
       min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: flex-start;
-      padding: 12px;
+      padding: 14px;
       overflow-x: hidden;
+      position: relative;
     }
 
-    .container {
+    /* Ambient Background Glows */
+    .ambient-glow {
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(120px);
+      pointer-events: none;
+      z-index: 0;
+      opacity: 0.5;
+      animation: pulseGlow 8s ease-in-out infinite alternate;
+    }
+    .glow-1 {
+      top: -100px;
+      left: -100px;
+      width: 350px;
+      height: 350px;
+      background: radial-gradient(circle, rgba(99, 102, 241, 0.4), transparent 70%);
+    }
+    .glow-2 {
+      bottom: -100px;
+      right: -100px;
+      width: 400px;
+      height: 400px;
+      background: radial-gradient(circle, rgba(6, 182, 212, 0.35), transparent 70%);
+    }
+
+    @keyframes pulseGlow {
+      0% { transform: scale(1) translate(0, 0); opacity: 0.4; }
+      100% { transform: scale(1.15) translate(20px, 20px); opacity: 0.65; }
+    }
+
+    /* Main Container */
+    .app-container {
       width: 100%;
-      max-width: 850px;
+      max-width: 900px;
       margin: 0 auto;
       display: flex;
       flex-direction: column;
       gap: 16px;
+      z-index: 1;
+      position: relative;
     }
 
+    /* Header Bar */
     header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 12px 16px;
+      padding: 12px 18px;
       background: var(--bg-card);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border: 1px solid var(--border-color);
-      border-radius: 16px;
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--border-glass);
+      border-radius: var(--radius-xl);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
     }
 
-    .brand {
+    .brand-logo {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 12px;
+    }
+
+    .logo-icon {
+      width: 38px;
+      height: 38px;
+      border-radius: 12px;
+      background: var(--accent-gradient);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
       font-size: 1.1rem;
+      box-shadow: 0 0 15px var(--accent-glow);
+    }
+
+    .brand-title {
+      font-size: 1.15rem;
       font-weight: 700;
-      color: var(--text-main);
+      letter-spacing: -0.3px;
+      background: linear-gradient(135deg, #ffffff 0%, #cbd5e1 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
     }
 
-    .brand i {
-      color: var(--accent);
-      font-size: 1.4rem;
-    }
-
-    .badge {
-      font-size: 0.75rem;
-      background: rgba(59, 130, 246, 0.2);
-      color: #60a5fa;
-      border: 1px solid rgba(96, 165, 250, 0.3);
-      padding: 4px 10px;
-      border-radius: 20px;
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.78rem;
       font-weight: 600;
-      letter-spacing: 0.5px;
+      padding: 5px 12px;
+      border-radius: 20px;
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      color: #34d399;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background-color: #34d399;
+      box-shadow: 0 0 8px #34d399;
+      animation: blink 1.8s infinite;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    /* Player Card & Wrapper */
+    .player-card {
+      background: var(--bg-card);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--border-glass);
+      border-radius: var(--radius-xl);
+      overflow: hidden;
+      box-shadow: 0 15px 35px rgba(0, 0, 0, 0.5);
+      transition: border-color 0.3s ease, box-shadow 0.3s ease;
+    }
+
+    .player-card:hover {
+      border-color: var(--border-glow);
+      box-shadow: 0 20px 45px rgba(99, 102, 241, 0.2);
     }
 
     .player-wrapper {
       position: relative;
       width: 100%;
-      border-radius: 20px;
-      overflow: hidden;
       background: #000;
-      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 0 20px var(--accent-glow);
-      border: 1px solid var(--border-color);
+      aspect-ratio: 16 / 9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
     }
 
-    /* Custom Plyr adjustments */
     .plyr {
-      border-radius: 20px;
-      font-family: 'Outfit', sans-serif;
+      width: 100%;
+      height: 100%;
+      --plyr-color-main: #6366f1;
+      --plyr-control-radius: 8px;
     }
 
-    .info-card {
-      background: var(--bg-card);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border: 1px solid var(--border-color);
-      border-radius: 16px;
-      padding: 18px;
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+    /* Custom Loading Overlay */
+    .loading-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(11, 15, 25, 0.9);
       display: flex;
       flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      z-index: 10;
+      transition: opacity 0.4s ease, visibility 0.4s ease;
+    }
+
+    .loading-overlay.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    .spinner {
+      width: 50px;
+      height: 50px;
+      border: 3px solid rgba(99, 102, 241, 0.2);
+      border-top-color: var(--accent-primary);
+      border-right-color: var(--accent-secondary);
+      border-radius: 50%;
+      animation: spin 0.8s cubic-bezier(0.68, -0.55, 0.27, 1.55) infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .loading-text {
+      font-size: 0.95rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      letter-spacing: 0.2px;
+    }
+
+    /* Info Bar & Metadata */
+    .info-section {
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .title-wrapper {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
       gap: 12px;
     }
 
-    .file-title {
-      font-size: 1.15rem;
-      font-weight: 600;
+    .video-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      line-height: 1.4;
       color: var(--text-main);
       word-break: break-word;
-      line-height: 1.4;
     }
 
-    .meta-row {
+    .meta-pills {
       display: flex;
       flex-wrap: wrap;
-      gap: 12px;
+      gap: 10px;
       align-items: center;
-      font-size: 0.85rem;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.82rem;
+      font-weight: 500;
+      padding: 6px 14px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: var(--radius-md);
       color: var(--text-muted);
     }
 
-    .meta-item {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      background: rgba(255, 255, 255, 0.05);
-      padding: 6px 12px;
-      border-radius: 8px;
+    .pill i {
+      color: var(--accent-secondary);
+      font-size: 0.85rem;
     }
 
-    .action-buttons {
-      display: flex;
+    .pill.highlight {
+      background: rgba(99, 102, 241, 0.15);
+      border-color: rgba(99, 102, 241, 0.3);
+      color: #a5b4fc;
+    }
+
+    /* Action Buttons Bar */
+    .action-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 12px;
-      flex-wrap: wrap;
       margin-top: 4px;
     }
 
     .btn {
-      flex: 1;
-      min-width: 140px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 8px;
-      padding: 12px 20px;
-      border-radius: 12px;
-      font-size: 0.95rem;
+      gap: 10px;
+      padding: 12px 18px;
+      border-radius: var(--radius-lg);
+      font-size: 0.92rem;
       font-weight: 600;
-      text-decoration: none;
-      color: #fff;
       cursor: pointer;
-      transition: all 0.2s ease;
-      border: none;
-      outline: none;
+      text-decoration: none;
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+      border: 1px solid transparent;
     }
 
     .btn-primary {
-      background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
-      box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4);
+      background: var(--accent-gradient);
+      color: #fff;
+      box-shadow: 0 4px 20px var(--accent-glow);
     }
 
     .btn-primary:hover {
-      background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
       transform: translateY(-2px);
+      box-shadow: 0 8px 25px rgba(99, 102, 241, 0.5);
     }
 
     .btn-secondary {
-      background: rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.06);
+      border-color: rgba(255, 255, 255, 0.1);
       color: var(--text-main);
-      border: 1px solid var(--border-color);
     }
 
     .btn-secondary:hover {
-      background: rgba(255, 255, 255, 0.18);
+      background: rgba(255, 255, 255, 0.12);
+      border-color: rgba(255, 255, 255, 0.2);
       transform: translateY(-2px);
     }
 
+    .btn:active {
+      transform: translateY(0) scale(0.98);
+    }
+
+    /* Toast Notification */
     .toast {
       position: fixed;
       bottom: 24px;
       left: 50%;
       transform: translateX(-50%) translateY(100px);
       background: rgba(15, 23, 42, 0.95);
-      border: 1px solid var(--accent);
-      color: #fff;
+      border: 1px solid var(--accent-primary);
+      color: var(--text-main);
       padding: 12px 24px;
       border-radius: 30px;
       font-size: 0.9rem;
-      font-weight: 500;
-      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
-      transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-      z-index: 9999;
-      pointer-events: none;
+      font-weight: 600;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(10px);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      z-index: 100;
+      opacity: 0;
+      transition: all 0.4s cubic-bezier(0.68, -0.55, 0.27, 1.55);
     }
 
     .toast.show {
       transform: translateX(-50%) translateY(0);
+      opacity: 1;
     }
 
+    .toast i {
+      color: #34d399;
+      font-size: 1.1rem;
+    }
+
+    /* Error View */
     .error-card {
       display: none;
-      padding: 24px;
-      background: rgba(239, 68, 68, 0.1);
-      border: 1px solid rgba(239, 68, 68, 0.3);
-      border-radius: 16px;
-      color: #f87171;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
       text-align: center;
+      padding: 40px 20px;
+      gap: 16px;
+      background: rgba(239, 68, 68, 0.08);
+      border: 1px solid rgba(239, 68, 68, 0.2);
+      border-radius: var(--radius-xl);
     }
 
     .error-card i {
-      font-size: 2.5rem;
-      margin-bottom: 12px;
+      font-size: 3rem;
+      color: #f87171;
+    }
+
+    .error-card h3 {
+      font-size: 1.2rem;
+      font-weight: 700;
+      color: #fca5a5;
+    }
+
+    .error-card p {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      max-width: 400px;
     }
   </style>
 </head>
 <body>
 
-  <div class="container">
+  <!-- Ambient Glow Effects -->
+  <div class="ambient-glow glow-1"></div>
+  <div class="ambient-glow glow-2"></div>
+
+  <div class="app-container">
+    <!-- Top Header -->
     <header>
-      <div class="brand">
-        <i class="fa-solid fa-circle-play"></i>
-        <span>TeraBox Player</span>
+      <div class="brand-logo">
+        <div class="logo-icon">
+          <i class="fa-solid fa-play"></i>
+        </div>
+        <div class="brand-title">TeraBox Player</div>
       </div>
-      <div class="badge">
-        <i class="fa-solid fa-bolt"></i> 0 MB Server Data
+      <div class="status-badge">
+        <span class="status-dot"></span>
+        <span>LIVE STREAM</span>
       </div>
     </header>
 
-    <div class="player-wrapper">
-      <video id="player" playsinline controls preload="metadata"></video>
+    <!-- Player Card -->
+    <div class="player-card">
+      <div class="player-wrapper">
+        <!-- Loading Overlay -->
+        <div class="loading-overlay" id="loadingOverlay">
+          <div class="spinner"></div>
+          <div class="loading-text">Preparing High-Speed Stream...</div>
+        </div>
+
+        <video id="player" playsinline controls preload="metadata"></video>
+      </div>
+
+      <!-- Info & Metadata Section -->
+      <div class="info-section">
+        <div class="title-wrapper">
+          <h1 class="video-title" id="videoTitle">Loading Media Title...</h1>
+        </div>
+
+        <div class="meta-pills">
+          <div class="pill highlight">
+            <i class="fa-solid fa-hard-drive"></i>
+            <span id="fileSizeText">-- MB</span>
+          </div>
+          <div class="pill">
+            <i class="fa-solid fa-clapperboard"></i>
+            <span>1080p HD</span>
+          </div>
+          <div class="pill">
+            <i class="fa-solid fa-bolt"></i>
+            <span>Ultra Fast CDN</span>
+          </div>
+        </div>
+
+        <div class="action-grid">
+          <a href="#" id="downloadBtn" class="btn btn-primary" target="_blank" rel="noopener noreferrer">
+            <i class="fa-solid fa-download"></i> Direct Download
+          </a>
+          <button id="copyBtn" class="btn btn-secondary" onclick="copyStreamUrl()">
+            <i class="fa-solid fa-copy"></i> Copy Stream Link
+          </button>
+          <button id="reloadBtn" class="btn btn-secondary" onclick="reloadStream()">
+            <i class="fa-solid fa-rotate-right"></i> Reload Player
+          </button>
+        </div>
+      </div>
     </div>
 
+    <!-- Error Card -->
     <div class="error-card" id="errorCard">
       <i class="fa-solid fa-triangle-exclamation"></i>
-      <h3 style="margin-bottom: 8px;">Video Stream Error</h3>
-      <p id="errorText">Unable to load stream. Please try using Direct Download instead.</p>
-    </div>
-
-    <div class="info-card">
-      <div class="file-title" id="fileTitle">TeraBox Video Stream</div>
-      
-      <div class="meta-row">
-        <div class="meta-item">
-          <i class="fa-solid fa-hard-drive"></i>
-          <span id="fileSize">Unknown Size</span>
-        </div>
-        <div class="meta-item">
-          <i class="fa-solid fa-shield-halved"></i>
-          <span>Direct Stream</span>
-        </div>
-      </div>
-
-      <div class="action-buttons">
-        <a id="downloadBtn" href="#" class="btn btn-primary" target="_blank" download>
-          <i class="fa-solid fa-download"></i> Direct Download
-        </a>
-        <button id="copyBtn" class="btn btn-secondary">
-          <i class="fa-solid fa-copy"></i> Copy Stream Link
-        </button>
-      </div>
+      <h3>Stream Link Expired or Invalid</h3>
+      <p>TeraBox stream link load nahi ho payi. Kripya bot me dobara naya link generate karein.</p>
+      <button class="btn btn-primary" onclick="closeWebApp()">
+        <i class="fa-solid fa-arrow-left"></i> Back to Telegram
+      </button>
     </div>
   </div>
 
-  <div class="toast" id="toast">Link copied to clipboard!</div>
+  <!-- Toast Element -->
+  <div class="toast" id="toast">
+    <i class="fa-solid fa-circle-check"></i>
+    <span id="toastText">Action completed successfully</span>
+  </div>
 
   <!-- Plyr Video Player JS -->
   <script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js"></script>
 
   <script>
-    // Initialize Telegram WebApp SDK
-    if (window.Telegram && window.Telegram.WebApp) {
-      window.Telegram.WebApp.ready();
-      window.Telegram.WebApp.expand();
-    }
-
-    // Function to parse query params
-    function getQueryParams() {
-      const params = {};
-      const search = window.location.search.substring(1);
-      if (!search) return params;
-      
-      const pairs = search.split('&');
-      for (let i = 0; i < pairs.length; i++) {
-        const pair = pairs[i].split('=');
-        if (pair[0]) {
-          params[decodeURIComponent(pair[0])] = decodeURIComponent(pair[1] || '');
-        }
+    // Initialize Telegram WebApp
+    const tg = window.Telegram ? window.Telegram.WebApp : null;
+    if (tg) {
+      tg.ready();
+      tg.expand();
+      if (tg.enableClosingConfirmation) {
+        tg.enableClosingConfirmation();
       }
-      return params;
     }
 
-    // Format bytes to human readable
+    // Helper: Parse Query Parameters
+    const urlParams = new URLSearchParams(window.location.search);
+    const rawStreamUrl = urlParams.get('url');
+    const rawTitle = urlParams.get('title') || 'TeraBox Stream Video';
+    const rawSize = parseInt(urlParams.get('size') || '0', 10);
+
+    // Format File Size
     function formatBytes(bytes) {
-      if (!bytes || bytes === '0' || isNaN(bytes)) return 'Unknown Size';
-      const b = parseInt(bytes, 10);
-      if (b === 0) return '0 Bytes';
+      if (!bytes || bytes === 0) return 'Unknown Size';
       const k = 1024;
       const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-      const i = Math.floor(Math.log(b) / Math.log(k));
-      return parseFloat((b / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
 
-    document.addEventListener('DOMContentLoaded', () => {
-      const params = getQueryParams();
-      const streamUrl = params.url || params.stream_url || '';
-      const title = params.title || params.name || 'TeraBox Video Stream';
-      const size = params.size || params.filesize || '';
+    // Elements
+    const playerEl = document.getElementById('player');
+    const videoTitleEl = document.getElementById('videoTitle');
+    const fileSizeTextEl = document.getElementById('fileSizeText');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const loadingOverlay = document.getElementById('loadingOverlay');
+    const errorCard = document.getElementById('errorCard');
 
-      // Update UI Text
-      document.getElementById('fileTitle').textContent = title;
-      document.getElementById('fileSize').textContent = formatBytes(size);
+    // Populate Metadata
+    videoTitleEl.textContent = rawTitle;
+    fileSizeTextEl.textContent = formatBytes(rawSize);
+    if (rawStreamUrl) {
+      downloadBtn.href = rawStreamUrl;
+    } else {
+      downloadBtn.style.display = 'none';
+    }
 
-      const videoElement = document.getElementById('player');
-      const downloadBtn = document.getElementById('downloadBtn');
-      const copyBtn = document.getElementById('copyBtn');
-      const toast = document.getElementById('toast');
-      const errorCard = document.getElementById('errorCard');
+    let plyrInstance = null;
 
-      if (streamUrl) {
-        videoElement.src = streamUrl;
-        downloadBtn.href = streamUrl;
-        if (title) {
-          downloadBtn.setAttribute('download', title);
-        }
-      } else {
-        errorCard.style.display = 'block';
-        document.getElementById('errorText').textContent = 'No video stream URL provided.';
-      }
+    // Load Stream
+    if (rawStreamUrl) {
+      playerEl.src = rawStreamUrl;
 
-      // Initialize Plyr
-      const player = new Plyr('#player', {
+      plyrInstance = new Plyr(playerEl, {
         controls: [
           'play-large', 'restart', 'rewind', 'play', 'fast-forward',
           'progress', 'current-time', 'duration', 'mute', 'volume',
-          'captions', 'settings', 'pip', 'airplay', 'fullscreen'
+          'settings', 'pip', 'airplay', 'fullscreen'
         ],
+        settings: ['speed'],
         speed: { selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 2] },
         tooltips: { controls: true, seek: true },
         keyboard: { focused: true, global: true }
       });
 
-      player.on('error', (e) => {
-        console.error('Playback error:', e);
-        errorCard.style.display = 'block';
+      playerEl.addEventListener('loadeddata', () => {
+        loadingOverlay.classList.add('hidden');
       });
 
-      // Copy link listener
-      copyBtn.addEventListener('click', () => {
-        if (!streamUrl) return;
-        navigator.clipboard.writeText(streamUrl).then(() => {
-          showToast('Stream link copied to clipboard!');
-        }).catch(err => {
-          showToast('Failed to copy link');
-        });
+      playerEl.addEventListener('canplay', () => {
+        loadingOverlay.classList.add('hidden');
       });
 
-      function showToast(msg) {
-        toast.textContent = msg;
-        toast.classList.add('show');
-        setTimeout(() => {
-          toast.classList.remove('show');
-        }, 3000);
+      playerEl.addEventListener('error', (e) => {
+        console.error("Video stream playback error:", e);
+        loadingOverlay.classList.add('hidden');
+        errorCard.style.display = 'flex';
+      });
+
+      // Fallback timer for overlay
+      setTimeout(() => {
+        loadingOverlay.classList.add('hidden');
+      }, 5000);
+    } else {
+      loadingOverlay.classList.add('hidden');
+      errorCard.style.display = 'flex';
+    }
+
+    // Copy Function
+    function copyStreamUrl() {
+      if (!rawStreamUrl) return;
+      navigator.clipboard.writeText(rawStreamUrl).then(() => {
+        showToast("Stream Link Copied to Clipboard!");
+        if (tg && tg.HapticFeedback) {
+          tg.HapticFeedback.notificationOccurred('success');
+        }
+      }).catch(err => {
+        showToast("Copy failed, please try manual copy.");
+      });
+    }
+
+    // Toast Function
+    function showToast(message) {
+      const toast = document.getElementById('toast');
+      const toastText = document.getElementById('toastText');
+      toastText.textContent = message;
+      toast.classList.add('show');
+      setTimeout(() => {
+        toast.classList.remove('show');
+      }, 3000);
+    }
+
+    // Reload Stream
+    function reloadStream() {
+      if (plyrInstance && rawStreamUrl) {
+        loadingOverlay.classList.remove('hidden');
+        playerEl.load();
+        playerEl.play().catch(() => {});
+        showToast("Reloading Stream...");
       }
-    });
+    }
+
+    // Close Web App
+    function closeWebApp() {
+      if (tg) {
+        tg.close();
+      } else {
+        window.history.back();
+      }
+    }
   </script>
 </body>
 </html>
