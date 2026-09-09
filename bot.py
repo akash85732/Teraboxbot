@@ -25,6 +25,9 @@ import threading
 import html as html_mod
 from pathlib import PurePath
 
+import hashlib
+from urllib.parse import quote_plus
+
 from pyrogram import Client, filters, raw, errors
 from pyrogram.enums import ChatMemberStatus, ParseMode, ButtonStyle
 from pyrogram.session import Session
@@ -34,6 +37,7 @@ from pyrogram.types import (
     InlineKeyboardMarkup,
     LinkPreviewOptions,
     Message,
+    WebAppInfo,
 )
 
 from config import Config
@@ -88,10 +92,22 @@ VIDEO_EXTENSIONS = {
 active_users: set[int] = set()
 dl_sem = asyncio.Semaphore(getattr(Config, "MAX_CONCURRENT_DOWNLOADS", 3))
 rate_limited: dict[int, float] = {}
-_pending: dict[int, str] = {}
-_cancel_req: dict[int, bool] = {}
-_db_import: dict[int, dict] = {}
-_broadcast_state: dict[int, dict] = {}
+_tg_upload_cache: dict[str, dict] = {}
+
+
+def _get_player_url(stream_url: str, filename: str, filesize: int) -> str:
+    base_url = (getattr(Config, "WEB_APP_URL", "") or "").strip()
+    if not base_url:
+        render_url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+        if render_url:
+            base_url = f"{render_url}/player"
+        else:
+            base_url = "https://akash85732.github.io/Teraboxbot/player.html"
+    
+    query = f"?url={quote_plus(stream_url)}&title={quote_plus(filename)}&size={filesize}"
+    if base_url.endswith(".html") or "/player" in base_url:
+        return f"{base_url}{query}"
+    return f"{base_url.rstrip('/')}/player.html{query}"
 
 
 class DownloadCancelled(Exception):
@@ -420,24 +436,13 @@ async def handle_link(client: Client, message: Message, link: str):
             await _send_fsub_prompt(client, chat_id, user_id, fsubs)
             return
 
-    if not _can_use(user_id):
-        await client.send_message(
-            chat_id,
-            "⏳ Pehle ka kaam abhi chalu hai. Thodi der baad try karo.",
-        )
-        return
-
     status_msg = None
-    filepath = None
-    file_name = ""
-    active_users.add(user_id)
     try:
         status_msg = await _send_status(
             client, chat_id,
             "🔄 <b>Aapka link process ho raha hai...</b>",
         )
 
-        # threadpool: async event loop kabhi block nahi hone denge
         file_info = await asyncio.wait_for(
             asyncio.to_thread(_resolve_sync, link), timeout=60
         )
@@ -447,13 +452,88 @@ async def handle_link(client: Client, message: Message, link: str):
         if not file_name:
             raise RuntimeError("Filename nahi mila - share link galat ya expired hai.")
 
+        download_link = file_info.get("download_link") or ""
         ext = os.path.splitext(file_name)[1].lstrip(".").lower()
-        caption = build_caption(file_name, file_size)
+        is_video = ext in VIDEO_EXTENSIONS or file_info.get("is_video", False)
+
+        cache_key = hashlib.md5(f"{chat_id}_{time.time()}".encode()).hexdigest()[:10]
+        _tg_upload_cache[cache_key] = {
+            "link": link,
+            "file_info": file_info,
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "created_at": time.time(),
+        }
+
+        buttons = []
+        if is_video and download_link:
+            player_url = _get_player_url(download_link, file_name, file_size)
+            if player_url.startswith("https://"):
+                buttons.append([
+                    InlineKeyboardButton("🎬 Watch Online (Web App)", web_app=WebAppInfo(url=player_url))
+                ])
+            else:
+                buttons.append([
+                    InlineKeyboardButton("🎬 Watch Online", url=player_url)
+                ])
+
+        if download_link:
+            buttons.append([
+                InlineKeyboardButton("🚀 Fast Direct Download", url=download_link)
+            ])
+
+        buttons.append([
+            InlineKeyboardButton("📥 Upload to Telegram", callback_data=f"tg_dl:{cache_key}")
+        ])
+
+        msg_text = (
+            f"✨ <b>{safe_html(file_name)}</b>\n\n"
+            f"📦 <b>Size:</b> {format_size(file_size)}\n"
+            f"⚡ <b>Status:</b> Direct Link Ready!\n\n"
+            f"<i>Niche diye option me se choose karein:</i>\n"
+            f"• <b>Watch Online:</b> 0 MB Server Data (Telegram me chalega)\n"
+            f"• <b>Fast Download:</b> Direct High Speed Download\n"
+            f"• <b>Upload to Telegram:</b> Bot Telegram chat me bhejega"
+        )
 
         await _edit_status(
             client, chat_id, status_msg.id,
-            f"📁 <b>{safe_html(file_name[:60])}</b>\n📦 {format_size(file_size)}",
+            msg_text,
+            reply_markup=InlineKeyboardMarkup(buttons)
         )
+
+    except Exception as e:
+        logger.error("Resolve error: %s", e, exc_info=True)
+        text = "❌ <b>File mil nahi payi.</b>\n\nThodi der baad dobara try karo."
+        if status_msg:
+            await _edit_status(client, chat_id, status_msg.id, text)
+        else:
+            await client.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+
+
+async def _download_and_upload_to_tg(
+    client: Client, chat_id: int, user_id: int, link: str, file_info: dict
+):
+    if not _can_use(user_id):
+        await client.send_message(
+            chat_id,
+            "⏳ Pehle ka kaam abhi chalu hai. Thodi der baad try karo.",
+        )
+        return
+
+    status_msg = None
+    filepath = None
+    file_name = file_info.get("filename") or ""
+    file_size = int(file_info.get("size") or file_info.get("file_size") or 0)
+    active_users.add(user_id)
+    try:
+        status_msg = await _send_status(
+            client, chat_id,
+            f"📥 <b>Download start ho raha hai...</b>\n📁 <code>{safe_html(file_name[:45])}</code>",
+        )
+
+        ext = os.path.splitext(file_name)[1].lstrip(".").lower()
+        caption = build_caption(file_name, file_size)
 
         last_edit = {"t": 0.0}
 
@@ -484,9 +564,6 @@ async def handle_link(client: Client, message: Message, link: str):
 
         task_id = str(chat_id)
 
-        # Auto-retry: dl-worker tokens expire and the resolver can hiccup, so a
-        # failed attempt re-resolves a fresh link and tries again (max 3). This
-        # keeps videos flowing even when a source is down for a few seconds.
         _MAX_DL_ATTEMPTS = 3
         attempt = 0
         last_dl_err: Optional[DownloadError] = None
@@ -531,7 +608,6 @@ async def handle_link(client: Client, message: Message, link: str):
                     await asyncio.sleep(2)
                     continue
 
-            # guard: verify_v2 / errno JSON kabhi upload nahi karenge
             with open(filepath, "rb") as f:
                 head = f.read(4096).lstrip()
             if head[:1] == b"{":
@@ -553,9 +629,6 @@ async def handle_link(client: Client, message: Message, link: str):
             f"📤 <b>Telegram par bheja ja raha hai...</b>\n📁 <code>{safe_html(file_name[:45])}</code>",
         )
 
-        # Throttled edit: editing on every chunk makes Pyrogram's upload loop
-        # wait 4s per edit (Telegram EditMessage cooldown), which stalls the
-        # upload itself. Only update the status message every few seconds.
         last_up_edit = {"t": 0.0, "b": 0}
 
         async def up_progress(current, total):
@@ -628,14 +701,7 @@ async def handle_link(client: Client, message: Message, link: str):
             await client.send_message(chat_id, text, parse_mode=ParseMode.HTML)
     except DownloadError as e:
         logger.error("Download error: %s", e)
-        if "cancell" in str(e).lower():
-            rate_limited.pop(user_id, None)
-            text = "❌ <b>Cancel kar diya gaya.</b>\n\nChaho to naya link bhej kar dobara download karo."
-        else:
-            text = (
-                "❌ <b>File mil nahi payi.</b>\n\n"
-                "Thodi der baad dobara try karo."
-            )
+        text = "❌ <b>File mil nahi payi.</b>\n\nThodi der baad dobara try karo."
         if status_msg:
             await _edit_status(client, chat_id, status_msg.id, text)
         else:
@@ -1414,6 +1480,23 @@ async def _handle_callback(client: Client, cb: CallbackQuery):
         )
         await cb.answer()
         return
+    if data.startswith("tg_dl:"):
+        cache_key = data.split(":", 1)[1]
+        cached = _tg_upload_cache.get(cache_key)
+        if not cached:
+            await cb.answer("⚠️ Ye request expire ho gayi hai. Naya link bhej kar try karo.", show_alert=True)
+            return
+        await cb.answer("⏳ Telegram upload start ho raha hai...")
+        asyncio.create_task(
+            _download_and_upload_to_tg(
+                client,
+                cb.message.chat.id,
+                cb.from_user.id if cb.from_user else cb.message.chat.id,
+                cached["link"],
+                cached["file_info"]
+            )
+        )
+        return
     if not (cb.from_user and is_owner(cb.from_user.id)):
         await cb.answer("Access Denied ❌", show_alert=True)
         return
@@ -1569,15 +1652,32 @@ def _start_health_server():
         from aiohttp import web
         async def handle(_request):
             return web.Response(text="ok", content_type="text/plain")
+
+        async def handle_player(_request):
+            try:
+                base_dir = os.path.dirname(__file__)
+                player_path = os.path.join(base_dir, "player.html")
+                if not os.path.exists(player_path):
+                    player_path = os.path.join(base_dir, "index.html")
+                if os.path.exists(player_path):
+                    with open(player_path, "r", encoding="utf-8") as f:
+                        return web.Response(text=f.read(), content_type="text/html")
+            except Exception as ex:
+                logger.warning("Error serving player: %s", ex)
+            return web.Response(text="Player page not found", status=404)
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         web_app = web.Application()
         web_app.router.add_get("/", handle)
+        web_app.router.add_get("/player", handle_player)
+        web_app.router.add_get("/player.html", handle_player)
+        web_app.router.add_get("/index.html", handle_player)
         runner = web.AppRunner(web_app)
         loop.run_until_complete(runner.setup())
         site = web.TCPSite(runner, "0.0.0.0", port)
         loop.run_until_complete(site.start())
-        logger.info("Health server listening on %s", port)
+        logger.info("Health & Player web server listening on %s", port)
         loop.run_forever()
     except Exception as e:
         logger.warning("Health server disabled: %s", e)

@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>TeraBox Stream Player</title>
+  
+  <!-- Telegram WebApp SDK -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  
+  <!-- Google Fonts & Icons -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- Plyr Video Player CSS -->
+  <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css" />
+
+  <style>
+    :root {
+      --bg-primary: #0f172a;
+      --bg-card: rgba(30, 41, 59, 0.7);
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --accent-glow: rgba(59, 130, 246, 0.4);
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --border-color: rgba(255, 255, 255, 0.1);
+      --plyr-color-main: #3b82f6;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: radial-gradient(circle at top, #1e293b 0%, #0f172a 100%);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 12px;
+      overflow-x: hidden;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 850px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      background: var(--bg-card);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+
+    .brand i {
+      color: var(--accent);
+      font-size: 1.4rem;
+    }
+
+    .badge {
+      font-size: 0.75rem;
+      background: rgba(59, 130, 246, 0.2);
+      color: #60a5fa;
+      border: 1px solid rgba(96, 165, 250, 0.3);
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+
+    .player-wrapper {
+      position: relative;
+      width: 100%;
+      border-radius: 20px;
+      overflow: hidden;
+      background: #000;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 0 20px var(--accent-glow);
+      border: 1px solid var(--border-color);
+    }
+
+    /* Custom Plyr adjustments */
+    .plyr {
+      border-radius: 20px;
+      font-family: 'Outfit', sans-serif;
+    }
+
+    .info-card {
+      background: var(--bg-card);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .file-title {
+      font-size: 1.15rem;
+      font-weight: 600;
+      color: var(--text-main);
+      word-break: break-word;
+      line-height: 1.4;
+    }
+
+    .meta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    .meta-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255, 255, 255, 0.05);
+      padding: 6px 12px;
+      border-radius: 8px;
+    }
+
+    .action-buttons {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+
+    .btn {
+      flex: 1;
+      min-width: 140px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 12px 20px;
+      border-radius: 12px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      text-decoration: none;
+      color: #fff;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      border: none;
+      outline: none;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+      box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4);
+    }
+
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
+      transform: translateY(-2px);
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--text-main);
+      border: 1px solid var(--border-color);
+    }
+
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.18);
+      transform: translateY(-2px);
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(100px);
+      background: rgba(15, 23, 42, 0.95);
+      border: 1px solid var(--accent);
+      color: #fff;
+      padding: 12px 24px;
+      border-radius: 30px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+      transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      z-index: 9999;
+      pointer-events: none;
+    }
+
+    .toast.show {
+      transform: translateX(-50%) translateY(0);
+    }
+
+    .error-card {
+      display: none;
+      padding: 24px;
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      border-radius: 16px;
+      color: #f87171;
+      text-align: center;
+    }
+
+    .error-card i {
+      font-size: 2.5rem;
+      margin-bottom: 12px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header>
+      <div class="brand">
+        <i class="fa-solid fa-circle-play"></i>
+        <span>TeraBox Player</span>
+      </div>
+      <div class="badge">
+        <i class="fa-solid fa-bolt"></i> 0 MB Server Data
+      </div>
+    </header>
+
+    <div class="player-wrapper">
+      <video id="player" playsinline controls preload="metadata"></video>
+    </div>
+
+    <div class="error-card" id="errorCard">
+      <i class="fa-solid fa-triangle-exclamation"></i>
+      <h3 style="margin-bottom: 8px;">Video Stream Error</h3>
+      <p id="errorText">Unable to load stream. Please try using Direct Download instead.</p>
+    </div>
+
+    <div class="info-card">
+      <div class="file-title" id="fileTitle">TeraBox Video Stream</div>
+      
+      <div class="meta-row">
+        <div class="meta-item">
+          <i class="fa-solid fa-hard-drive"></i>
+          <span id="fileSize">Unknown Size</span>
+        </div>
+        <div class="meta-item">
+          <i class="fa-solid fa-shield-halved"></i>
+          <span>Direct Stream</span>
+        </div>
+      </div>
+
+      <div class="action-buttons">
+        <a id="downloadBtn" href="#" class="btn btn-primary" target="_blank" download>
+          <i class="fa-solid fa-download"></i> Direct Download
+        </a>
+        <button id="copyBtn" class="btn btn-secondary">
+          <i class="fa-solid fa-copy"></i> Copy Stream Link
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast">Link copied to clipboard!</div>
+
+  <!-- Plyr Video Player JS -->
+  <script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js"></script>
+
+  <script>
+    // Initialize Telegram WebApp SDK
+    if (window.Telegram && window.Telegram.WebApp) {
+      window.Telegram.WebApp.ready();
+      window.Telegram.WebApp.expand();
+    }
+
+    // Function to parse query params
+    function getQueryParams() {
+      const params = {};
+      const search = window.location.search.substring(1);
+      if (!search) return params;
+      
+      const pairs = search.split('&');
+      for (let i = 0; i < pairs.length; i++) {
+        const pair = pairs[i].split('=');
+        if (pair[0]) {
+          params[decodeURIComponent(pair[0])] = decodeURIComponent(pair[1] || '');
+        }
+      }
+      return params;
+    }
+
+    // Format bytes to human readable
+    function formatBytes(bytes) {
+      if (!bytes || bytes === '0' || isNaN(bytes)) return 'Unknown Size';
+      const b = parseInt(bytes, 10);
+      if (b === 0) return '0 Bytes';
+      const k = 1024;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(b) / Math.log(k));
+      return parseFloat((b / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const params = getQueryParams();
+      const streamUrl = params.url || params.stream_url || '';
+      const title = params.title || params.name || 'TeraBox Video Stream';
+      const size = params.size || params.filesize || '';
+
+      // Update UI Text
+      document.getElementById('fileTitle').textContent = title;
+      document.getElementById('fileSize').textContent = formatBytes(size);
+
+      const videoElement = document.getElementById('player');
+      const downloadBtn = document.getElementById('downloadBtn');
+      const copyBtn = document.getElementById('copyBtn');
+      const toast = document.getElementById('toast');
+      const errorCard = document.getElementById('errorCard');
+
+      if (streamUrl) {
+        videoElement.src = streamUrl;
+        downloadBtn.href = streamUrl;
+        if (title) {
+          downloadBtn.setAttribute('download', title);
+        }
+      } else {
+        errorCard.style.display = 'block';
+        document.getElementById('errorText').textContent = 'No video stream URL provided.';
+      }
+
+      // Initialize Plyr
+      const player = new Plyr('#player', {
+        controls: [
+          'play-large', 'restart', 'rewind', 'play', 'fast-forward',
+          'progress', 'current-time', 'duration', 'mute', 'volume',
+          'captions', 'settings', 'pip', 'airplay', 'fullscreen'
+        ],
+        speed: { selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 2] },
+        tooltips: { controls: true, seek: true },
+        keyboard: { focused: true, global: true }
+      });
+
+      player.on('error', (e) => {
+        console.error('Playback error:', e);
+        errorCard.style.display = 'block';
+      });
+
+      // Copy link listener
+      copyBtn.addEventListener('click', () => {
+        if (!streamUrl) return;
+        navigator.clipboard.writeText(streamUrl).then(() => {
+          showToast('Stream link copied to clipboard!');
+        }).catch(err => {
+          showToast('Failed to copy link');
+        });
+      });
+
+      function showToast(msg) {
+        toast.textContent = msg;
+        toast.classList.add('show');
+        setTimeout(() => {
+          toast.classList.remove('show');
+        }, 3000);
+      }
+    });
+  </script>
+</body>
+</html>

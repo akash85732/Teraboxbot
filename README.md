@@ -1,14 +1,14 @@
-# TeraBox Downloader Bot (Railway-ready) 🚀
+# TeraBox Downloader Bot & Web Player 🚀
 
-Hinglish/English support. Bas TeraBox share link bhejo — video direct is chat me aa jayegi.
+Hinglish/English support. Bas TeraBox share link bhejo — video instantly online play karne ke liye **Telegram Web App Player** button milega (0 MB server bandwidth).
 
-## Architecture (research-driven)
+## Architecture (Zero-Bandwidth & High Performance)
 
 | Step | Method | Problem it solves |
 |------|--------|-------------------|
-| 1. **Instant fast path** | `sendVideo(chat_id, video=<official TeraBox dlink>)` via HTTP Bot API — **Telegram fetch karta hai** | 0 bandwidth, 0 disk, "1-second" type delivery. Verified: `ok=True` in 1.7s. URL NEVER shown to user |
-| 2. **Fallback path** | button click → parallel-ranged downloader (8 connections, JSON/`verify_v2` sniffing) → **Pyrogram MTProto upload** | HTTP Bot API ka ***50MB upload limit (error 413)*** MTProto me nahi hai — files up to **2GB** |
-| 3. Railway behavior | env-var config, ephemeral-disk safe, auto cleanup, health server on `$PORT`, no supervisor needed | Railway containers restarted ho toh kuch residue nahi bachta |
+| 1. **Zero-Bandwidth WebApp Player** | Telegram WebApp (`player.html` HTML5 Plyr.io Player) — **Direct Stream from TeraBox CDN to User Mobile** | **0 MB Server Bandwidth consumed!** Fixes Render / VPS bandwidth quota exhaustion permanently! Instant 2-second playback. |
+| 2. **Fast Direct Download** | Direct URL to browser / ADM / IDM | High speed direct downloading without hitting host server bandwidth. |
+| 3. **Telegram Upload Fallback** | Button click → MTProto upload | When users specifically want the file uploaded into Telegram chat. MTProto handles up to 2GB files. |
 
 ### Why MTProto and not HTTP for uploads?
 Telegram HTTP Bot API allows only **50 MB per upload** (`413 Request Entity Too Large` — the exact error we saw on VPS). Pyrogram/MTProto bots can upload **up to 2 GB**. This is the standard trick used by high-traffic bots.

@@ -26,6 +26,9 @@ class Config:
     # MongoDB (for user storage & broadcast)
     MONGO_URI = os.environ.get("MONGO_URI", "")
 
+    # Web App Player URL (e.g. GitHub Pages or Render domain)
+    WEB_APP_URL = os.environ.get("WEB_APP_URL", "")
+
     # Health check port for Render
     PORT = int(os.environ.get("PORT", 8080))
 
