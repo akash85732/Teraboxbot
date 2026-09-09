@@ -310,20 +310,33 @@ async def _send_status(client: Client, chat_id: int, text: str):
     try:
         return await client.send_message(
             chat_id, text, parse_mode=ParseMode.HTML,
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            disable_web_page_preview=True,
         )
-    except Exception:
-        return None
+    except Exception as e:
+        logger.error("_send_status failed: %s", e)
+        try:
+            return await client.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+        except Exception:
+            return None
 
 
-async def _edit_status(client: Client, chat_id: int, msg_id: int, text: str):
+async def _edit_status(client: Client, chat_id: int, msg_id: int, text: str, reply_markup=None):
     try:
         return await client.edit_message_text(
             chat_id, msg_id, text, parse_mode=ParseMode.HTML,
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            disable_web_page_preview=True,
+            reply_markup=reply_markup,
         )
-    except Exception:
-        return None
+    except Exception as e:
+        logger.error("_edit_status failed: %s", e)
+        try:
+            return await client.edit_message_text(
+                chat_id, msg_id, text, parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup,
+            )
+        except Exception:
+            return None
+
 
 
 async def _check_member(client: Client, channel: str, user_id: int):
@@ -427,7 +440,7 @@ async def _send_welcome_dm(client: Client, user_id: int):
 
 
 # ---------------------------------------------------------------- main flow
-async def handle_link(client: Client, message: Message, link: str):
+async def handle_link(client: Client, message: Message, link: str, status_msg=None):
     user_id = message.from_user.id if message.from_user else message.chat.id
     chat_id = message.chat.id
     _cancel_req.pop(user_id, None)
@@ -442,14 +455,20 @@ async def handle_link(client: Client, message: Message, link: str):
             await _send_fsub_prompt(client, chat_id, user_id, fsubs)
             return
 
-    status_msg = None
-    try:
+    if status_msg is None:
         status_msg = await _send_status(
             client, chat_id,
             "🔄 <b>Aapka link process ho raha hai...</b>",
         )
+    else:
+        await _edit_status(
+            client, chat_id, status_msg.id,
+            "🔄 <b>Aapka link process ho raha hai...</b>",
+        )
 
+    try:
         file_info = await asyncio.wait_for(
+
             asyncio.to_thread(_resolve_sync, link), timeout=60
         )
         file_name = file_info.get("filename") or ""
@@ -1091,15 +1110,21 @@ async def on_private(client: Client, message: Message):
         return
     if not _mark_handled(message.chat.id, message.id):
         return
+
+    # Instant acknowledgement reply
+    status_msg = await _send_status(client, message.chat.id, "⏳ <b>Processing link... Please wait</b>")
+
     link = extract_link(message.text)
     if not link:
-        await message.reply_text(
-            "⚠️ <b>Invalid Link</b>\n\nKripya valid TeraBox video link bhejein.",
-            parse_mode=ParseMode.HTML,
-        )
+        text = f"⚠️ <b>Invalid TeraBox Link</b>\n\nReceived: <code>{safe_html((message.text or '')[:100])}</code>\nKripya valid TeraBox video link bhejein."
+        if status_msg:
+            await _edit_status(client, message.chat.id, status_msg.id, text)
+        else:
+            await client.send_message(message.chat.id, text, parse_mode=ParseMode.HTML)
         return
 
-    await handle_link(client, message, link)
+    await handle_link(client, message, link, status_msg)
+
 
 
 # ---------------------------------------------------------------- admin panel
