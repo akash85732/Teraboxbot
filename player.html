@@ -3,38 +3,39 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>TeraBox Ultra Stream Player</title>
+  <title>TeraBox Stream Player</title>
 
   <!-- Telegram WebApp SDK -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
-  <!-- Google Fonts & FontAwesome -->
+  <!-- Google Fonts & FontAwesome Icons -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
-  <!-- Plyr Video Player CSS -->
+  <!-- HLS.js for M3U8 streaming & Plyr Video Player CSS -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css" />
 
   <style>
     :root {
       --bg-dark: #070913;
-      --bg-card: rgba(15, 23, 42, 0.65);
-      --bg-card-hover: rgba(30, 41, 59, 0.8);
-      --border-glass: rgba(255, 255, 255, 0.08);
-      --border-glow: rgba(99, 102, 241, 0.4);
+      --bg-card: rgba(15, 23, 42, 0.75);
+      --bg-card-hover: rgba(30, 41, 59, 0.85);
+      --border-glass: rgba(255, 255, 255, 0.1);
+      --border-glow: rgba(99, 102, 241, 0.5);
       --accent-primary: #6366f1;
       --accent-secondary: #06b6d4;
       --accent-gradient: linear-gradient(135deg, #6366f1 0%, #06b6d4 100%);
-      --accent-glow: rgba(99, 102, 241, 0.35);
+      --accent-glow: rgba(99, 102, 241, 0.4);
       --text-main: #f8fafc;
       --text-muted: #94a3b8;
       --text-dim: #64748b;
       --plyr-color-main: #6366f1;
-      --radius-xl: 20px;
-      --radius-lg: 14px;
-      --radius-md: 10px;
+      --radius-xl: 24px;
+      --radius-lg: 16px;
+      --radius-md: 12px;
     }
 
     * {
@@ -53,7 +54,7 @@
       flex-direction: column;
       align-items: center;
       justify-content: flex-start;
-      padding: 14px;
+      padding: 12px;
       overflow-x: hidden;
       position: relative;
     }
@@ -62,40 +63,40 @@
     .ambient-glow {
       position: fixed;
       border-radius: 50%;
-      filter: blur(120px);
+      filter: blur(140px);
       pointer-events: none;
       z-index: 0;
-      opacity: 0.5;
-      animation: pulseGlow 8s ease-in-out infinite alternate;
+      opacity: 0.55;
+      animation: pulseGlow 10s ease-in-out infinite alternate;
     }
     .glow-1 {
-      top: -100px;
-      left: -100px;
-      width: 350px;
-      height: 350px;
-      background: radial-gradient(circle, rgba(99, 102, 241, 0.4), transparent 70%);
-    }
-    .glow-2 {
-      bottom: -100px;
-      right: -100px;
+      top: -120px;
+      left: -120px;
       width: 400px;
       height: 400px;
-      background: radial-gradient(circle, rgba(6, 182, 212, 0.35), transparent 70%);
+      background: radial-gradient(circle, rgba(99, 102, 241, 0.45), transparent 70%);
+    }
+    .glow-2 {
+      bottom: -120px;
+      right: -120px;
+      width: 450px;
+      height: 450px;
+      background: radial-gradient(circle, rgba(6, 182, 212, 0.4), transparent 70%);
     }
 
     @keyframes pulseGlow {
-      0% { transform: scale(1) translate(0, 0); opacity: 0.4; }
-      100% { transform: scale(1.15) translate(20px, 20px); opacity: 0.65; }
+      0% { transform: scale(1) translate(0, 0); opacity: 0.45; }
+      100% { transform: scale(1.2) translate(30px, 30px); opacity: 0.7; }
     }
 
     /* Main Container */
     .app-container {
       width: 100%;
-      max-width: 900px;
+      max-width: 920px;
       margin: 0 auto;
       display: flex;
       flex-direction: column;
-      gap: 16px;
+      gap: 14px;
       z-index: 1;
       position: relative;
     }
@@ -107,8 +108,8 @@
       justify-content: space-between;
       padding: 12px 18px;
       background: var(--bg-card);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
       border: 1px solid var(--border-glass);
       border-radius: var(--radius-xl);
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
@@ -129,8 +130,8 @@
       align-items: center;
       justify-content: center;
       color: #fff;
-      font-size: 1.1rem;
-      box-shadow: 0 0 15px var(--accent-glow);
+      font-size: 1.15rem;
+      box-shadow: 0 0 18px var(--accent-glow);
     }
 
     .brand-title {
@@ -142,16 +143,22 @@
       -webkit-text-fill-color: transparent;
     }
 
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
     .status-badge {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      font-size: 0.78rem;
+      font-size: 0.76rem;
       font-weight: 600;
       padding: 5px 12px;
       border-radius: 20px;
-      background: rgba(16, 185, 129, 0.12);
-      border: 1px solid rgba(16, 185, 129, 0.3);
+      background: rgba(16, 185, 129, 0.14);
+      border: 1px solid rgba(16, 185, 129, 0.35);
       color: #34d399;
     }
 
@@ -169,21 +176,37 @@
       50% { opacity: 0.3; }
     }
 
+    .btn-close-app {
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 0.9rem;
+      transition: all 0.2s ease;
+    }
+
+    .btn-close-app:hover {
+      background: rgba(239, 68, 68, 0.2);
+      color: #f87171;
+      border-color: rgba(239, 68, 68, 0.4);
+    }
+
     /* Player Card & Wrapper */
     .player-card {
       background: var(--bg-card);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
+      backdrop-filter: blur(25px);
+      -webkit-backdrop-filter: blur(25px);
       border: 1px solid var(--border-glass);
       border-radius: var(--radius-xl);
       overflow: hidden;
-      box-shadow: 0 15px 35px rgba(0, 0, 0, 0.5);
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
       transition: border-color 0.3s ease, box-shadow 0.3s ease;
-    }
-
-    .player-card:hover {
-      border-color: var(--border-glow);
-      box-shadow: 0 20px 45px rgba(99, 102, 241, 0.2);
     }
 
     .player-wrapper {
@@ -211,7 +234,7 @@
       left: 0;
       width: 100%;
       height: 100%;
-      background: rgba(11, 15, 25, 0.9);
+      background: rgba(7, 9, 19, 0.92);
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -228,8 +251,8 @@
     }
 
     .spinner {
-      width: 50px;
-      height: 50px;
+      width: 52px;
+      height: 52px;
       border: 3px solid rgba(99, 102, 241, 0.2);
       border-top-color: var(--accent-primary);
       border-right-color: var(--accent-secondary);
@@ -250,10 +273,10 @@
 
     /* Info Bar & Metadata */
     .info-section {
-      padding: 20px;
+      padding: 18px 20px;
       display: flex;
       flex-direction: column;
-      gap: 16px;
+      gap: 14px;
     }
 
     .title-wrapper {
@@ -264,7 +287,7 @@
     }
 
     .video-title {
-      font-size: 1.25rem;
+      font-size: 1.2rem;
       font-weight: 700;
       line-height: 1.4;
       color: var(--text-main);
@@ -283,7 +306,7 @@
       align-items: center;
       gap: 6px;
       font-family: 'JetBrains Mono', monospace;
-      font-size: 0.82rem;
+      font-size: 0.8rem;
       font-weight: 500;
       padding: 6px 14px;
       background: rgba(255, 255, 255, 0.05);
@@ -299,14 +322,15 @@
 
     .pill.highlight {
       background: rgba(99, 102, 241, 0.15);
-      border-color: rgba(99, 102, 241, 0.3);
+      border-color: rgba(99, 102, 241, 0.35);
       color: #a5b4fc;
     }
 
-    /* Action Buttons Bar */
+    /* Action Grid */
     .action-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      display: flex;
+      align-items: center;
+      justify-content: center;
       gap: 12px;
       margin-top: 4px;
     }
@@ -316,14 +340,16 @@
       align-items: center;
       justify-content: center;
       gap: 10px;
-      padding: 12px 18px;
+      padding: 12px 24px;
       border-radius: var(--radius-lg);
-      font-size: 0.92rem;
+      font-size: 0.95rem;
       font-weight: 600;
       cursor: pointer;
       text-decoration: none;
       transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
       border: 1px solid transparent;
+      width: 100%;
+      max-width: 320px;
     }
 
     .btn-primary {
@@ -335,18 +361,6 @@
     .btn-primary:hover {
       transform: translateY(-2px);
       box-shadow: 0 8px 25px rgba(99, 102, 241, 0.5);
-    }
-
-    .btn-secondary {
-      background: rgba(255, 255, 255, 0.06);
-      border-color: rgba(255, 255, 255, 0.1);
-      color: var(--text-main);
-    }
-
-    .btn-secondary:hover {
-      background: rgba(255, 255, 255, 0.12);
-      border-color: rgba(255, 255, 255, 0.2);
-      transform: translateY(-2px);
     }
 
     .btn:active {
@@ -433,9 +447,14 @@
         </div>
         <div class="brand-title">TeraBox Player</div>
       </div>
-      <div class="status-badge">
-        <span class="status-dot"></span>
-        <span>LIVE STREAM</span>
+      <div class="header-actions">
+        <div class="status-badge">
+          <span class="status-dot"></span>
+          <span>LIVE STREAM</span>
+        </div>
+        <button class="btn-close-app" onclick="closeWebApp()" title="Close Player">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
       </div>
     </header>
 
@@ -445,7 +464,7 @@
         <!-- Loading Overlay -->
         <div class="loading-overlay" id="loadingOverlay">
           <div class="spinner"></div>
-          <div class="loading-text">Preparing High-Speed Stream...</div>
+          <div class="loading-text">Connecting to High-Speed Stream...</div>
         </div>
 
         <video id="player" playsinline controls preload="metadata"></video>
@@ -470,22 +489,25 @@
             <i class="fa-solid fa-bolt"></i>
             <span>Ultra Fast CDN</span>
           </div>
+          <div class="pill">
+            <i class="fa-solid fa-lock"></i>
+            <span>SSL Encrypted</span>
+          </div>
         </div>
 
         <div class="action-grid">
-          <button id="reloadBtn" class="btn btn-secondary" onclick="reloadStream()">
+          <button id="reloadBtn" class="btn btn-primary" onclick="reloadStream()">
             <i class="fa-solid fa-rotate-right"></i> Reload Player
           </button>
         </div>
-
       </div>
     </div>
 
     <!-- Error Card -->
     <div class="error-card" id="errorCard">
       <i class="fa-solid fa-triangle-exclamation"></i>
-      <h3>Stream Link Expired or Invalid</h3>
-      <p>TeraBox stream link load nahi ho payi. Kripya bot me dobara naya link generate karein.</p>
+      <h3>Stream Could Not Be Loaded</h3>
+      <p>TeraBox video stream link load nahi ho paya. Link expire ho gaya ho sakta hai.</p>
       <button class="btn btn-primary" onclick="closeWebApp()">
         <i class="fa-solid fa-arrow-left"></i> Back to Telegram
       </button>
@@ -495,7 +517,7 @@
   <!-- Toast Element -->
   <div class="toast" id="toast">
     <i class="fa-solid fa-circle-check"></i>
-    <span id="toastText">Action completed successfully</span>
+    <span id="toastText">Action completed</span>
   </div>
 
   <!-- Plyr Video Player JS -->
@@ -531,24 +553,51 @@
     const playerEl = document.getElementById('player');
     const videoTitleEl = document.getElementById('videoTitle');
     const fileSizeTextEl = document.getElementById('fileSizeText');
-    const downloadBtn = document.getElementById('downloadBtn');
     const loadingOverlay = document.getElementById('loadingOverlay');
     const errorCard = document.getElementById('errorCard');
 
     // Populate Metadata
-    videoTitleEl.textContent = rawTitle;
-    fileSizeTextEl.textContent = formatBytes(rawSize);
-    if (rawStreamUrl) {
-      downloadBtn.href = rawStreamUrl;
-    } else {
-      downloadBtn.style.display = 'none';
-    }
+    if (videoTitleEl) videoTitleEl.textContent = rawTitle;
+    if (fileSizeTextEl) fileSizeTextEl.textContent = formatBytes(rawSize);
 
     let plyrInstance = null;
 
+    function hideOverlay() {
+      if (loadingOverlay) {
+        loadingOverlay.classList.add('hidden');
+      }
+    }
+
+    function showError() {
+      hideOverlay();
+      if (errorCard) {
+        errorCard.style.display = 'flex';
+      }
+    }
+
     // Load Stream
     if (rawStreamUrl) {
-      playerEl.src = rawStreamUrl;
+      const isM3U8 = rawStreamUrl.includes('.m3u8') || rawStreamUrl.includes('type=M3U8');
+
+      if (isM3U8 && Hls.isSupported()) {
+        const hls = new Hls({
+          capLevelToPlayerSize: true,
+          autoStartLoad: true
+        });
+        hls.loadSource(rawStreamUrl);
+        hls.attachMedia(playerEl);
+        hls.on(Hls.Events.MANIFEST_PARSED, function () {
+          hideOverlay();
+        });
+        hls.on(Hls.Events.ERROR, function (event, data) {
+          if (data.fatal) {
+            console.error("HLS fatal error:", data);
+            showError();
+          }
+        });
+      } else {
+        playerEl.src = rawStreamUrl;
+      }
 
       plyrInstance = new Plyr(playerEl, {
         controls: [
@@ -562,60 +611,44 @@
         keyboard: { focused: true, global: true }
       });
 
-      playerEl.addEventListener('loadeddata', () => {
-        loadingOverlay.classList.add('hidden');
-      });
-
-      playerEl.addEventListener('canplay', () => {
-        loadingOverlay.classList.add('hidden');
-      });
-
+      playerEl.addEventListener('loadeddata', hideOverlay);
+      playerEl.addEventListener('canplay', hideOverlay);
+      playerEl.addEventListener('playing', hideOverlay);
       playerEl.addEventListener('error', (e) => {
-        console.error("Video stream playback error:", e);
-        loadingOverlay.classList.add('hidden');
-        errorCard.style.display = 'flex';
+        console.error("Video element playback error:", e);
+        showError();
       });
 
-      // Fallback timer for overlay
-      setTimeout(() => {
-        loadingOverlay.classList.add('hidden');
-      }, 5000);
+      // Backup timer to hide spinner after 6 seconds
+      setTimeout(hideOverlay, 6000);
     } else {
-      loadingOverlay.classList.add('hidden');
-      errorCard.style.display = 'flex';
-    }
-
-    // Copy Function
-    function copyStreamUrl() {
-      if (!rawStreamUrl) return;
-      navigator.clipboard.writeText(rawStreamUrl).then(() => {
-        showToast("Stream Link Copied to Clipboard!");
-        if (tg && tg.HapticFeedback) {
-          tg.HapticFeedback.notificationOccurred('success');
-        }
-      }).catch(err => {
-        showToast("Copy failed, please try manual copy.");
-      });
+      showError();
     }
 
     // Toast Function
     function showToast(message) {
       const toast = document.getElementById('toast');
       const toastText = document.getElementById('toastText');
-      toastText.textContent = message;
-      toast.classList.add('show');
-      setTimeout(() => {
-        toast.classList.remove('show');
-      }, 3000);
+      if (toast && toastText) {
+        toastText.textContent = message;
+        toast.classList.add('show');
+        setTimeout(() => {
+          toast.classList.remove('show');
+        }, 3000);
+      }
     }
 
     // Reload Stream
     function reloadStream() {
-      if (plyrInstance && rawStreamUrl) {
-        loadingOverlay.classList.remove('hidden');
+      if (rawStreamUrl) {
+        if (loadingOverlay) loadingOverlay.classList.remove('hidden');
+        if (errorCard) errorCard.style.display = 'none';
         playerEl.load();
-        playerEl.play().catch(() => {});
+        playerEl.play().then(hideOverlay).catch(() => { hideOverlay(); });
         showToast("Reloading Stream...");
+        if (tg && tg.HapticFeedback) {
+          tg.HapticFeedback.impactOccurred('medium');
+        }
       }
     }
 
