@@ -729,6 +729,7 @@
               <button class="ctrl-btn" id="forwardBtn" title="Forward 10s">
                 <i class="fa-solid fa-rotate-right"></i>
               </button>
+              <button class="ctrl-btn" id="forward30Btn" title="Forward 30s" style="font-size: 0.78rem; font-weight: 700; background: rgba(255,255,255,0.12); padding: 3px 8px; border-radius: 6px; font-family: 'JetBrains Mono', monospace;">+30s</button>
 
               <div class="volume-box">
                 <button class="ctrl-btn" id="muteBtn" title="Mute/Unmute">
@@ -1007,7 +1008,7 @@
         }
       });
 
-      // Seeking & Stall Auto-Recovery System
+      // Seeking & Stall Auto-Recovery System (Instant Fast Seeking)
       video.addEventListener('waiting', () => {
         if (loaderOverlay && video.currentTime > 0) {
           loaderOverlay.classList.remove('hidden');
@@ -1026,6 +1027,7 @@
       video.addEventListener('seeking', () => {
         if (loaderOverlay) loaderOverlay.classList.remove('hidden');
         if (currentHls) {
+          currentHls.stopLoad();
           currentHls.startLoad(video.currentTime);
         }
       });
@@ -1101,9 +1103,22 @@
 
     forwardBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (currentHls) currentHls.stopLoad();
       video.currentTime = Math.min(video.duration, video.currentTime + 10);
+      if (currentHls) currentHls.startLoad(video.currentTime);
       showCenterFeedback('fa-rotate-right');
     });
+
+    const forward30Btn = document.getElementById('forward30Btn');
+    if (forward30Btn) {
+      forward30Btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (currentHls) currentHls.stopLoad();
+        video.currentTime = Math.min(video.duration, video.currentTime + 30);
+        if (currentHls) currentHls.startLoad(video.currentTime);
+        showCenterFeedback('fa-angles-right');
+      });
+    }
 
     // Volume Control
     volumeSlider.addEventListener('input', (e) => {
