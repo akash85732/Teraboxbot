@@ -526,12 +526,6 @@ async def handle_link(client: Client, message: Message, link: str, status_msg=No
                     InlineKeyboardButton("▶️ Watch Online", url=player_url)
                 ])
 
-
-
-        buttons.append([
-            InlineKeyboardButton("📥 Upload to Telegram", callback_data=f"tg_dl:{cache_key}")
-        ])
-
         msg_text = (
             f"🎬 <b>{safe_html(file_name)}</b>\n\n"
             f"📦 <b>Size:</b> {format_size(file_size)}\n"

@@ -926,18 +926,38 @@
 
       if (isM3U8 && Hls.isSupported()) {
         currentHls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: false,
+          backBufferLength: 90,
+          maxBufferLength: 60,
+          maxMaxBufferLength: 120,
+          maxBufferHole: 0.5,
+          highBufferWatchdogPeriod: 2,
+          nudgeOffset: 0.1,
+          nudgeMaxRetry: 10,
           capLevelToPlayerSize: true,
           autoStartLoad: true,
-          maxBufferLength: 30,
-          maxMaxBufferLength: 60,
         });
         currentHls.loadSource(targetUrl);
         currentHls.attachMedia(video);
-        currentHls.on(Hls.Events.MANIFEST_PARSED, hideLoader);
+        currentHls.on(Hls.Events.MANIFEST_PARSED, function() {
+          hideLoader();
+        });
         currentHls.on(Hls.Events.ERROR, function(event, data) {
           if (data.fatal) {
-            console.warn("HLS fatal error:", data);
-            handleStreamFailure();
+            switch (data.type) {
+              case Hls.ErrorTypes.NETWORK_ERROR:
+                console.warn("HLS network error, recovering...");
+                currentHls.startLoad();
+                break;
+              case Hls.ErrorTypes.MEDIA_ERROR:
+                console.warn("HLS media error, recovering...");
+                currentHls.recoverMediaError();
+                break;
+              default:
+                handleStreamFailure();
+                break;
+            }
           }
         });
       } else {
@@ -974,6 +994,36 @@
           const bufEnd = video.buffered.end(video.buffered.length - 1);
           const bufPct = (bufEnd / video.duration) * 100 || 0;
           progressBuffer.style.width = `${bufPct}%`;
+        }
+      });
+
+      // Seeking & Stall Auto-Recovery System
+      video.addEventListener('waiting', () => {
+        if (loaderOverlay && video.currentTime > 0) {
+          loaderOverlay.classList.remove('hidden');
+        }
+        if (currentHls) {
+          currentHls.startLoad(video.currentTime);
+        }
+      });
+
+      video.addEventListener('stalled', () => {
+        if (currentHls) {
+          currentHls.startLoad(video.currentTime);
+        }
+      });
+
+      video.addEventListener('seeking', () => {
+        if (loaderOverlay) loaderOverlay.classList.remove('hidden');
+        if (currentHls) {
+          currentHls.startLoad(video.currentTime);
+        }
+      });
+
+      video.addEventListener('seeked', () => {
+        hideLoader();
+        if (!video.paused) {
+          video.play().catch(() => {});
         }
       });
 
