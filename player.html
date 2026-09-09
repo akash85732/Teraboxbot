@@ -826,6 +826,7 @@
     // Parse URL Params
     const urlParams = new URLSearchParams(window.location.search);
     const rawUrl = urlParams.get('url');
+    const altUrl = urlParams.get('alt');
     const rawTitle = urlParams.get('title') || 'TeraBox Stream Video';
     const rawSize = parseInt(urlParams.get('size') || '0', 10);
 
@@ -906,21 +907,56 @@
     videoViewport.addEventListener('mousemove', showControls);
     videoViewport.addEventListener('touchstart', showControls);
 
-    // Video Stream Loading Engine (HLS + Direct HTML5)
-    if (rawUrl) {
-      const isM3U8 = rawUrl.includes('.m3u8') || rawUrl.includes('type=M3U8');
+    // Video Stream Loading Engine (HLS + Direct HTML5 + Fallback)
+    let currentHls = null;
+    let triedAlt = false;
+
+    function playStreamUrl(targetUrl) {
+      if (!targetUrl) {
+        showError();
+        return;
+      }
+
+      if (currentHls) {
+        currentHls.destroy();
+        currentHls = null;
+      }
+
+      const isM3U8 = targetUrl.includes('.m3u8') || targetUrl.includes('type=M3U8') || targetUrl.includes('/share/streaming');
 
       if (isM3U8 && Hls.isSupported()) {
-        const hls = new Hls({ capLevelToPlayerSize: true, autoStartLoad: true });
-        hls.loadSource(rawUrl);
-        hls.attachMedia(video);
-        hls.on(Hls.Events.MANIFEST_PARSED, hideLoader);
-        hls.on(Hls.Events.ERROR, function(event, data) {
-          if (data.fatal) showError();
+        currentHls = new Hls({
+          capLevelToPlayerSize: true,
+          autoStartLoad: true,
+          maxBufferLength: 30,
+          maxMaxBufferLength: 60,
+        });
+        currentHls.loadSource(targetUrl);
+        currentHls.attachMedia(video);
+        currentHls.on(Hls.Events.MANIFEST_PARSED, hideLoader);
+        currentHls.on(Hls.Events.ERROR, function(event, data) {
+          if (data.fatal) {
+            console.warn("HLS fatal error:", data);
+            handleStreamFailure();
+          }
         });
       } else {
-        video.src = rawUrl;
+        video.src = targetUrl;
       }
+    }
+
+    function handleStreamFailure() {
+      if (!triedAlt && altUrl && altUrl !== rawUrl) {
+        triedAlt = true;
+        showToast("Switching to backup stream...");
+        playStreamUrl(altUrl);
+      } else {
+        showError();
+      }
+    }
+
+    if (rawUrl) {
+      playStreamUrl(rawUrl);
 
       video.addEventListener('loadedmetadata', () => {
         hideLoader();
@@ -945,7 +981,7 @@
       video.addEventListener('canplay', hideLoader);
       video.addEventListener('error', (e) => {
         console.error("Playback error:", e);
-        showError();
+        handleStreamFailure();
       });
 
       setTimeout(hideLoader, 6000);

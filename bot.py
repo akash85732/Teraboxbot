@@ -96,7 +96,7 @@ rate_limited: dict[int, float] = {}
 _tg_upload_cache: dict[str, dict] = {}
 
 
-def _get_player_url(stream_url: str, filename: str, filesize: int) -> str:
+def _get_player_url(stream_url: str, filename: str, filesize: int, alt_urls: list = None) -> str:
     base_url = (getattr(Config, "WEB_APP_URL", "") or "").strip()
     if not base_url:
         render_url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
@@ -105,7 +105,22 @@ def _get_player_url(stream_url: str, filename: str, filesize: int) -> str:
         else:
             base_url = "https://akash85732.github.io/Teraboxbot/player.html"
     
-    query = f"?url={quote_plus(stream_url)}&title={quote_plus(filename)}&size={filesize}"
+    best_stream = stream_url
+    alts = alt_urls or []
+    for candidate in [stream_url] + alts:
+        if candidate and ("type=M3U8" in candidate or ".m3u8" in candidate or "/share/streaming" in candidate):
+            best_stream = candidate
+            break
+
+    query = f"?url={quote_plus(best_stream)}&title={quote_plus(filename)}&size={filesize}"
+    
+    if stream_url and stream_url != best_stream:
+        query += f"&alt={quote_plus(stream_url)}"
+    for a in alts:
+        if a and a != best_stream and a != stream_url:
+            query += f"&alt={quote_plus(a)}"
+            break
+
     if base_url.endswith(".html") or "/player" in base_url:
         return f"{base_url}{query}"
     return f"{base_url.rstrip('/')}/player.html{query}"
@@ -492,7 +507,7 @@ async def handle_link(client: Client, message: Message, link: str, status_msg=No
 
         buttons = []
         if is_video and download_link:
-            player_url = _get_player_url(download_link, file_name, file_size)
+            player_url = _get_player_url(download_link, file_name, file_size, file_info.get("alt_links") or [])
             if player_url.startswith("https://"):
                 buttons.append([
                     InlineKeyboardButton("▶️ Watch Online (Web App)", web_app=WebAppInfo(url=player_url))
