@@ -363,8 +363,9 @@ async def _check_member(client: Client, channel: str, user_id: int):
             ChatMemberStatus.ADMINISTRATOR,
             ChatMemberStatus.MEMBER,
         )
-    except Exception:
-        return None
+    except Exception as e:
+        logger.warning("Fsub check skipped for %s: %s", channel, e)
+        return True
 
 
 def _fsub_channels() -> list:
@@ -409,7 +410,7 @@ async def _check_all_member(client: Client, channels: list, user_id: int) -> boo
     return checked > 0
 
 
-async def _send_fsub_prompt(client: Client, chat_id: int, user_id: int, channels: list):
+async def _send_fsub_prompt(client: Client, chat_id: int, user_id: int, channels: list, status_msg=None):
     """Send the force-subscribe join prompt with Join + Check buttons."""
     if not channels:
         return
@@ -428,15 +429,20 @@ async def _send_fsub_prompt(client: Client, chat_id: int, user_id: int, channels
     buttons.append([
         InlineKeyboardButton("✅ Check Karo", callback_data=f"fsubc:{user_id}", style=ButtonStyle.SUCCESS)
     ])
-    try:
-        await client.send_message(
-            chat_id,
-            "\n".join(lines),
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
-    except Exception:
-        pass
+    markup = InlineKeyboardMarkup(buttons)
+    text = "\n".join(lines)
+    if status_msg:
+        await _edit_status(client, chat_id, status_msg.id, text, reply_markup=markup)
+    else:
+        try:
+            await client.send_message(
+                chat_id,
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+            )
+        except Exception:
+            pass
 
 
 async def _send_welcome_dm(client: Client, user_id: int):
@@ -468,7 +474,7 @@ async def handle_link(client: Client, message: Message, link: str, status_msg=No
     if fsubs and not is_owner(user_id):
         ok = await _check_all_member(client, fsubs, user_id)
         if not ok:
-            await _send_fsub_prompt(client, chat_id, user_id, fsubs)
+            await _send_fsub_prompt(client, chat_id, user_id, fsubs, status_msg)
             return
 
     if status_msg is None:
@@ -1120,9 +1126,6 @@ async def on_private(client: Client, message: Message):
                     await message.reply_text("❌ Database file padh nahi paya. Sahi .json file bhejo.")
             return
         return
-    if not _mark_handled(message.chat.id, message.id):
-        return
-
     # Instant acknowledgement reply
     status_msg = await _send_status(client, message.chat.id, "⏳ <b>Processing link... Please wait</b>")
 
