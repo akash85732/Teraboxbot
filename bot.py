@@ -95,6 +95,9 @@ active_users: set[int] = set()
 dl_sem = asyncio.Semaphore(getattr(Config, "MAX_CONCURRENT_DOWNLOADS", 3))
 rate_limited: dict[int, float] = {}
 _tg_upload_cache: dict[str, dict] = {}
+_pending: dict[int, str] = {}
+_cancel_req: dict[int, bool] = {}
+_db_import: dict[int, dict] = {}
 
 
 def _get_player_url(stream_url: str, filename: str, filesize: int, alt_urls: list = None) -> str:
@@ -1722,7 +1725,7 @@ def _start_health_server():
         web_app.router.add_get("/player", handle_player)
         web_app.router.add_get("/player.html", handle_player)
         web_app.router.add_get("/index.html", handle_player)
-        runner = web.AppRunner(web_app)
+        runner = web.AppRunner(web_app, access_log=None)
         loop.run_until_complete(runner.setup())
         site = web.TCPSite(runner, "0.0.0.0", port)
         loop.run_until_complete(site.start())
