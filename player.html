@@ -373,19 +373,20 @@
       transform: translateY(10px);
     }
 
-    /* Progress Bar */
+    /* Ultra-Modern Progress Seek Bar */
     .progress-container {
       position: relative;
       width: 100%;
-      height: 6px;
-      background: rgba(255, 255, 255, 0.15);
+      height: 8px;
+      background: rgba(255, 255, 255, 0.18);
       border-radius: var(--radius-full);
       cursor: pointer;
-      transition: height 0.2s ease;
+      transition: height 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      touch-action: none;
     }
 
-    .progress-container:hover {
-      height: 10px;
+    .progress-container:hover, .progress-container.dragging {
+      height: 12px;
     }
 
     .progress-buffer {
@@ -393,9 +394,10 @@
       top: 0;
       left: 0;
       height: 100%;
-      background: rgba(255, 255, 255, 0.3);
+      background: rgba(255, 255, 255, 0.35);
       border-radius: var(--radius-full);
       width: 0%;
+      transition: width 0.3s ease;
     }
 
     .progress-filled {
@@ -403,27 +405,54 @@
       top: 0;
       left: 0;
       height: 100%;
-      background: var(--accent-gradient);
+      background: linear-gradient(90deg, #6366f1 0%, #06b6d4 50%, #22d3ee 100%);
       border-radius: var(--radius-full);
       width: 0%;
-      box-shadow: 0 0 12px var(--accent-glow);
+      box-shadow: 0 0 16px rgba(34, 211, 238, 0.75);
     }
 
     .progress-thumb {
       position: absolute;
       top: 50%;
       left: 0%;
-      transform: translate(-50%, -50%) scale(0);
-      width: 14px;
-      height: 14px;
-      background: #fff;
+      transform: translate(-50%, -50%) scale(0.85);
+      width: 16px;
+      height: 16px;
+      background: #ffffff;
+      border: 3px solid #22d3ee;
       border-radius: 50%;
-      box-shadow: 0 0 10px rgba(0,0,0,0.8);
-      transition: transform 0.2s ease;
+      box-shadow: 0 0 14px rgba(34, 211, 238, 0.9), 0 2px 8px rgba(0, 0, 0, 0.6);
+      transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
     }
 
-    .progress-container:hover .progress-thumb {
-      transform: translate(-50%, -50%) scale(1);
+    .progress-container:hover .progress-thumb, .progress-container.dragging .progress-thumb {
+      transform: translate(-50%, -50%) scale(1.25);
+    }
+
+    /* Seek Hover/Touch Time Tooltip */
+    .seek-tooltip {
+      position: absolute;
+      bottom: 22px;
+      transform: translateX(-50%);
+      background: rgba(15, 23, 42, 0.94);
+      border: 1px solid var(--accent-cyan);
+      color: #fff;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.78rem;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 8px;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.15s ease;
+      box-shadow: 0 8px 25px rgba(0,0,0,0.7);
+      backdrop-filter: blur(12px);
+      white-space: nowrap;
+      z-index: 30;
+    }
+
+    .progress-container:hover .seek-tooltip, .progress-container.dragging .seek-tooltip {
+      opacity: 1;
     }
 
     /* Controls Bottom Row */
@@ -563,38 +592,58 @@
       color: #a5b4fc;
     }
 
-    /* Refresh/Reload Action Button */
+    /* Action Buttons Row */
     .action-row {
       display: flex;
-      justify-content: center;
-      margin-top: 4px;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      margin-top: 6px;
     }
 
-    .reload-btn {
+    .action-btn {
+      flex: 1;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 10px;
-      padding: 14px 28px;
+      padding: 14px 20px;
       border-radius: var(--radius-lg);
-      font-size: 0.98rem;
+      font-size: 0.95rem;
       font-weight: 700;
       cursor: pointer;
-      background: var(--accent-gradient);
-      color: #fff;
       border: none;
-      box-shadow: 0 6px 25px var(--accent-glow);
-      transition: all 0.25s ease;
-      width: 100%;
-      max-width: 340px;
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
     }
 
-    .reload-btn:hover {
+    .fullscreen-btn-main {
+      background: linear-gradient(135deg, #6366f1 0%, #06b6d4 100%);
+      color: #fff;
+      box-shadow: 0 6px 25px rgba(99, 102, 241, 0.45);
+    }
+
+    .fullscreen-btn-main:hover {
       transform: translateY(-2px);
-      box-shadow: 0 10px 30px rgba(99, 102, 241, 0.55);
+      box-shadow: 0 10px 30px rgba(99, 102, 241, 0.65);
     }
 
-    .reload-btn:active {
+    .fullscreen-btn-main:active {
+      transform: translateY(0) scale(0.98);
+    }
+
+    .reload-btn-main {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: var(--text-main);
+    }
+
+    .reload-btn-main:hover {
+      background: rgba(255, 255, 255, 0.15);
+      border-color: rgba(255, 255, 255, 0.3);
+      transform: translateY(-2px);
+    }
+
+    .reload-btn-main:active {
       transform: translateY(0) scale(0.98);
     }
 
@@ -712,6 +761,7 @@
         <div class="controls-overlay" id="controlsOverlay">
           <!-- Progress Slider -->
           <div class="progress-container" id="progressContainer">
+            <div class="seek-tooltip" id="seekTooltip">00:00</div>
             <div class="progress-buffer" id="progressBuffer"></div>
             <div class="progress-filled" id="progressFilled"></div>
             <div class="progress-thumb" id="progressThumb"></div>
@@ -789,7 +839,10 @@
         </div>
 
         <div class="action-row">
-          <button class="reload-btn" onclick="reloadStream()">
+          <button class="action-btn fullscreen-btn-main" onclick="toggleFullscreen()">
+            <i class="fa-solid fa-expand"></i> Full Screen Mode
+          </button>
+          <button class="action-btn reload-btn-main" onclick="reloadStream()">
             <i class="fa-solid fa-rotate-right"></i> Reload Stream
           </button>
         </div>
@@ -1087,11 +1140,72 @@
       togglePlay();
     });
 
-    // Seek / Progress Click
-    progressContainer.addEventListener('click', (e) => {
+    // Enhanced Progress Scrubbing & Hover Time Tooltip
+    const seekTooltip = document.getElementById('seekTooltip');
+    let isDraggingProgress = false;
+
+    function updateSeekTooltip(e) {
+      if (!progressContainer || !video.duration) return;
       const rect = progressContainer.getBoundingClientRect();
-      const pos = (e.clientX - rect.left) / rect.width;
-      video.currentTime = pos * video.duration;
+      const clientX = e.touches && e.touches.length ? e.touches[0].clientX : e.clientX;
+      const offsetX = Math.max(0, Math.min(clientX - rect.left, rect.width));
+      const pos = offsetX / rect.width;
+      const targetTime = pos * video.duration;
+      
+      if (seekTooltip) {
+        seekTooltip.textContent = formatTime(targetTime);
+        seekTooltip.style.left = `${offsetX}px`;
+      }
+      return pos;
+    }
+
+    function handleSeekAction(e) {
+      const pos = updateSeekTooltip(e);
+      if (pos !== undefined && video.duration) {
+        if (currentHls) currentHls.stopLoad();
+        video.currentTime = pos * video.duration;
+        if (currentHls) currentHls.startLoad(video.currentTime);
+      }
+    }
+
+    progressContainer.addEventListener('mousemove', updateSeekTooltip);
+
+    progressContainer.addEventListener('mousedown', (e) => {
+      isDraggingProgress = true;
+      progressContainer.classList.add('dragging');
+      handleSeekAction(e);
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (isDraggingProgress) {
+        handleSeekAction(e);
+      }
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (isDraggingProgress) {
+        isDraggingProgress = false;
+        progressContainer.classList.remove('dragging');
+      }
+    });
+
+    progressContainer.addEventListener('touchstart', (e) => {
+      isDraggingProgress = true;
+      progressContainer.classList.add('dragging');
+      handleSeekAction(e);
+    }, { passive: true });
+
+    document.addEventListener('touchmove', (e) => {
+      if (isDraggingProgress) {
+        handleSeekAction(e);
+      }
+    }, { passive: true });
+
+    document.addEventListener('touchend', () => {
+      if (isDraggingProgress) {
+        isDraggingProgress = false;
+        progressContainer.classList.remove('dragging');
+      }
     });
 
     // Rewind / Forward 10s
@@ -1159,18 +1273,37 @@
       }
     });
 
-    // Fullscreen Toggle
-    fullscreenBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (!document.fullscreenElement) {
-        if (videoViewport.requestFullscreen) videoViewport.requestFullscreen();
-        else if (videoViewport.webkitRequestFullscreen) videoViewport.webkitRequestFullscreen();
-        fullscreenBtn.innerHTML = '<i class="fa-solid fa-compress"></i>';
+    // Fullscreen Toggle Helper
+    function toggleFullscreen() {
+      if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+        if (videoViewport.requestFullscreen) {
+          videoViewport.requestFullscreen();
+        } else if (videoViewport.webkitRequestFullscreen) {
+          videoViewport.webkitRequestFullscreen();
+        } else if (video.requestFullscreen) {
+          video.requestFullscreen();
+        } else if (video.webkitEnterFullscreen) {
+          video.webkitEnterFullscreen();
+        }
+        if (fullscreenBtn) fullscreenBtn.innerHTML = '<i class="fa-solid fa-compress"></i>';
+        showToast("Fullscreen Mode Enabled");
       } else {
-        if (document.exitFullscreen) document.exitFullscreen();
-        fullscreenBtn.innerHTML = '<i class="fa-solid fa-expand"></i>';
+        if (document.exitFullscreen) {
+          document.exitFullscreen();
+        } else if (document.webkitExitFullscreen) {
+          document.webkitExitFullscreen();
+        }
+        if (fullscreenBtn) fullscreenBtn.innerHTML = '<i class="fa-solid fa-expand"></i>';
+        showToast("Exited Fullscreen");
       }
-    });
+    }
+
+    if (fullscreenBtn) {
+      fullscreenBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleFullscreen();
+      });
+    }
 
     // Keyboard Shortcuts
     document.addEventListener('keydown', (e) => {
