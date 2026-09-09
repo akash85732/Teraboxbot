@@ -922,21 +922,23 @@
         currentHls = null;
       }
 
-      const isM3U8 = targetUrl.includes('.m3u8') || targetUrl.includes('type=M3U8') || targetUrl.includes('/share/streaming');
+      const isM3U8 = targetUrl.includes('.m3u8') || targetUrl.includes('type=M3U8') || targetUrl.includes('get_m3u8_stream_fast') || targetUrl.includes('/share/streaming');
 
       if (isM3U8 && Hls.isSupported()) {
         currentHls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
-          backBufferLength: 90,
-          maxBufferLength: 60,
-          maxMaxBufferLength: 120,
+          backBufferLength: 120,
+          maxBufferLength: 90,
+          maxMaxBufferLength: 180,
           maxBufferHole: 0.5,
           highBufferWatchdogPeriod: 2,
           nudgeOffset: 0.1,
           nudgeMaxRetry: 10,
           capLevelToPlayerSize: true,
           autoStartLoad: true,
+          fragLoadingTimeOut: 15000,
+          fragLoadingMaxRetry: 5,
         });
         currentHls.loadSource(targetUrl);
         currentHls.attachMedia(video);
