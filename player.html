@@ -1216,9 +1216,9 @@
         return;
       }
 
-      // Auto-Proxy raw TeraBox URLs if loaded directly on a reverse proxy host
+      // Auto-Proxy raw TeraBox URLs if loaded directly on a reverse proxy host (excluding teraboxdl)
       let finalTarget = targetUrl;
-      const isTeraBoxRaw = targetUrl.includes('1024tera') || targetUrl.includes('terabox') || targetUrl.includes('teraboxdl');
+      const isTeraBoxRaw = (targetUrl.includes('1024tera') || targetUrl.includes('terabox.com') || targetUrl.includes('4funbox') || targetUrl.includes('mirrobox')) && !targetUrl.includes('teraboxdl.site');
       if (isTeraBoxRaw && !targetUrl.includes('/stream_proxy') && window.location.origin.startsWith('http')) {
         finalTarget = window.location.origin + '/stream_proxy?url=' + encodeURIComponent(targetUrl);
       }
@@ -1263,18 +1263,26 @@
             showTapToPlay();
           });
         });
+        let hlsNetworkErrors = 0;
         currentHls.on(Hls.Events.ERROR, function(event, data) {
           if (data.fatal) {
             switch (data.type) {
               case Hls.ErrorTypes.NETWORK_ERROR:
-                console.warn("HLS network error, recovering...");
-                currentHls.startLoad();
+                hlsNetworkErrors++;
+                console.warn("HLS network error retry #" + hlsNetworkErrors);
+                if (hlsNetworkErrors <= 3) {
+                  currentHls.startLoad();
+                } else {
+                  currentHls.destroy();
+                  handleStreamFailure();
+                }
                 break;
               case Hls.ErrorTypes.MEDIA_ERROR:
                 console.warn("HLS media error, recovering...");
                 currentHls.recoverMediaError();
                 break;
               default:
+                currentHls.destroy();
                 handleStreamFailure();
                 break;
             }
@@ -1284,12 +1292,14 @@
         // Native iOS Safari HLS Support
         video.src = finalTarget;
         video.addEventListener('loadedmetadata', hideLoader);
+        video.onerror = handleStreamFailure;
         video.play().then(hideLoader).catch(err => {
           console.warn("Native iOS HLS play error:", err);
           showTapToPlay();
         });
       } else {
         video.src = finalTarget;
+        video.onerror = handleStreamFailure;
         video.load();
         const p = video.play();
         if (p !== undefined) {
@@ -1306,7 +1316,7 @@
     function handleStreamFailure() {
       fallbackStep++;
       if (fallbackStep === 1 && altUrl && altUrl !== rawUrl) {
-        showToast("Switching to backup stream source...");
+        showToast("Primary stream busy, switching to backup stream...");
         playStreamUrl(altUrl);
       } else if (fallbackStep === 2 && rawUrl && !rawUrl.includes('/stream_proxy')) {
         showToast("Connecting via High-Speed Stream Proxy...");

@@ -140,21 +140,27 @@ def _get_player_host() -> str:
 def _get_player_url(stream_url: str, filename: str, filesize: int, alt_urls: list = None) -> str:
     host = _get_player_host()
     
-    final_stream_url = stream_url
-    final_alts = alt_urls or []
+    def should_proxy(u: str) -> bool:
+        if not host or not u:
+            return False
+        if u.startswith(host):
+            return False
+        # Proxy domains that enforce CORS restriction, keep direct MP4 links direct
+        if "teraboxdl.site" in u.lower():
+            return False
+        return any(dom in u.lower() for dom in ["1024tera", "terabox", "4funbox", "mirrobox", "nephobox", "freeterabox"])
 
-    if host and stream_url:
-        if not stream_url.startswith(host):
-            final_stream_url = f"{host}/stream_proxy?url={quote_plus(stream_url)}"
-        
-        proxied_alts = []
-        for a in final_alts:
-            if a and a != stream_url:
-                if not a.startswith(host):
-                    proxied_alts.append(f"{host}/stream_proxy?url={quote_plus(a)}")
-                else:
-                    proxied_alts.append(a)
-        final_alts = proxied_alts
+    final_stream_url = stream_url
+    if should_proxy(stream_url):
+        final_stream_url = f"{host}/stream_proxy?url={quote_plus(stream_url)}"
+    
+    final_alts = []
+    for a in (alt_urls or []):
+        if a and a != stream_url:
+            if should_proxy(a):
+                final_alts.append(f"{host}/stream_proxy?url={quote_plus(a)}")
+            else:
+                final_alts.append(a)
 
     base_url = (getattr(Config, "WEB_APP_URL", "") or "").strip()
     if host:
@@ -2449,59 +2455,57 @@ def _start_health_server():
                 
             try:
                 import aiohttp
-                session = aiohttp.ClientSession()
-                async with session.get(
-                    target_url,
-                    headers=headers,
-                    allow_redirects=True,
-                    timeout=aiohttp.ClientTimeout(total=25)
-                ) as resp:
-                    content_type = resp.headers.get("Content-Type", "")
-                    
-                    if ".m3u8" in target_url or "type=M3U8" in target_url or "mpegurl" in content_type.lower():
-                        text = await resp.text()
-                        host_url = f"{request.scheme}://{request.host}"
-                        new_lines = []
-                        for line in text.splitlines():
-                            line_str = line.strip()
-                            if line_str.startswith("http://") or line_str.startswith("https://"):
-                                proxied_segment = f"{host_url}/stream_proxy?url={quote_plus(line_str)}"
-                                new_lines.append(proxied_segment)
-                            else:
-                                new_lines.append(line)
+                timeout_config = aiohttp.ClientTimeout(sock_connect=15, sock_read=60, total=None)
+                async with aiohttp.ClientSession(timeout=timeout_config) as session:
+                    async with session.get(
+                        target_url,
+                        headers=headers,
+                        allow_redirects=True,
+                    ) as resp:
+                        content_type = resp.headers.get("Content-Type", "")
                         
-                        await session.close()
-                        return web.Response(
-                            text="\n".join(new_lines),
-                            content_type="application/x-mpegURL",
+                        if ".m3u8" in target_url or "type=M3U8" in target_url or "mpegurl" in content_type.lower():
+                            text = await resp.text()
+                            host_url = f"{request.scheme}://{request.host}"
+                            new_lines = []
+                            for line in text.splitlines():
+                                line_str = line.strip()
+                                if line_str.startswith("http://") or line_str.startswith("https://"):
+                                    proxied_segment = f"{host_url}/stream_proxy?url={quote_plus(line_str)}"
+                                    new_lines.append(proxied_segment)
+                                else:
+                                    new_lines.append(line)
+                            
+                            return web.Response(
+                                text="\n".join(new_lines),
+                                content_type="application/x-mpegURL",
+                                headers={
+                                    "Access-Control-Allow-Origin": "*",
+                                    "Access-Control-Allow-Headers": "*",
+                                    "Access-Control-Allow-Methods": "GET, OPTIONS",
+                                }
+                            )
+                        
+                        response = web.StreamResponse(
+                            status=resp.status,
                             headers={
+                                "Content-Type": content_type or "video/mp4",
                                 "Access-Control-Allow-Origin": "*",
                                 "Access-Control-Allow-Headers": "*",
                                 "Access-Control-Allow-Methods": "GET, OPTIONS",
+                                "Accept-Ranges": resp.headers.get("Accept-Ranges", "bytes"),
                             }
                         )
-                    
-                    response = web.StreamResponse(
-                        status=resp.status,
-                        headers={
-                            "Content-Type": content_type or "application/octet-stream",
-                            "Access-Control-Allow-Origin": "*",
-                            "Access-Control-Allow-Headers": "*",
-                            "Access-Control-Allow-Methods": "GET, OPTIONS",
-                            "Accept-Ranges": resp.headers.get("Accept-Ranges", "bytes"),
-                        }
-                    )
-                    if "Content-Length" in resp.headers:
-                        response.headers["Content-Length"] = resp.headers["Content-Length"]
-                    if "Content-Range" in resp.headers:
-                        response.headers["Content-Range"] = resp.headers["Content-Range"]
-                        
-                    await response.prepare(request)
-                    async for chunk in resp.content.iter_chunked(64 * 1024):
-                        await response.write(chunk)
-                    await response.write_eof()
-                    await session.close()
-                    return response
+                        if "Content-Length" in resp.headers:
+                            response.headers["Content-Length"] = resp.headers["Content-Length"]
+                        if "Content-Range" in resp.headers:
+                            response.headers["Content-Range"] = resp.headers["Content-Range"]
+                            
+                        await response.prepare(request)
+                        async for chunk in resp.content.iter_chunked(64 * 1024):
+                            await response.write(chunk)
+                        await response.write_eof()
+                        return response
             except Exception as e:
                 logger.warning(f"Stream proxy error: {e}")
                 return web.Response(text=f"Proxy error: {e}", status=500)
