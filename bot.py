@@ -41,7 +41,7 @@ from pyrogram.types import (
 )
 
 from config import Config
-from terabox import get_file_info
+from terabox import get_file_info, _get_short_url_id
 from downloader import downloader, DownloadError, _cleanup_file
 from db import (
     add_admin,
@@ -711,16 +711,24 @@ async def handle_link(client: Client, message: Message, link: str, status_msg=No
         }
 
         buttons = []
+        surl_id = await _get_short_url_id(link)
+
+        if surl_id:
+            fast_player_url = f"https://old2.wawof50236.workers.dev/?q={surl_id}"
+            buttons.append([
+                InlineKeyboardButton("▶️ Online Player", style=ButtonStyle.PRIMARY, web_app=WebAppInfo(url=fast_player_url))
+            ])
+
         if is_video and download_link:
             player_url = _get_player_url(download_link, file_name, file_size, file_info.get("alt_links") or [])
             if player_url.startswith("https://"):
                 buttons.append([
-                    InlineKeyboardButton("▶️ Watch Online (Full Screen)", style=ButtonStyle.PRIMARY, web_app=WebAppInfo(url=player_url))
+                    InlineKeyboardButton("🎬 Cinema HD Player", style=ButtonStyle.SUCCESS, web_app=WebAppInfo(url=player_url))
                 ])
                 buttons.append([
-                    InlineKeyboardButton("🌐 Open in Browser (Chrome)", url=player_url)
+                    InlineKeyboardButton("🌐 Open in Browser", url=player_url)
                 ])
-            else:
+            elif not surl_id:
                 buttons.append([
                     InlineKeyboardButton("▶️ Watch Online", style=ButtonStyle.PRIMARY, url=player_url)
                 ])
@@ -728,7 +736,8 @@ async def handle_link(client: Client, message: Message, link: str, status_msg=No
         msg_text = (
             f"🎬 <b>{safe_html(file_name)}</b>\n\n"
             f"📦 <b>Size:</b> {format_size(file_size)}\n"
-            f"⚡ <b>Status:</b> Stream Ready"
+            f"⚡ <b>Status:</b> Stream Ready\n\n"
+            f"📥 <i>Click <b>'Online Player'</b> below to play instantly in full screen!</i>"
         )
 
 
