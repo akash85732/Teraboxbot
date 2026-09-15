@@ -711,27 +711,15 @@ async def handle_link(client: Client, message: Message, link: str, status_msg=No
         }
 
         buttons = []
-        host = _get_player_host()
         if is_video and download_link:
-            iteraplay_url = f"{host}/iteraplay?url={quote_plus(link)}" if host else f"https://iteraplay.com/?url={quote_plus(link)}"
             player_url = _get_player_url(download_link, file_name, file_size, file_info.get("alt_links") or [])
-            
-            if iteraplay_url.startswith("https://"):
-                buttons.append([
-                    InlineKeyboardButton("▶️ Watch Online (iTeraPlay)", style=ButtonStyle.PRIMARY, web_app=WebAppInfo(url=iteraplay_url))
-                ])
-            else:
-                buttons.append([
-                    InlineKeyboardButton("▶️ Watch Online (iTeraPlay)", style=ButtonStyle.PRIMARY, url=iteraplay_url)
-                ])
-                
             if player_url.startswith("https://"):
                 buttons.append([
-                    InlineKeyboardButton("🎬 Watch Online (Cinema HD)", style=ButtonStyle.SUCCESS, web_app=WebAppInfo(url=player_url))
+                    InlineKeyboardButton("▶️ Watch Online (Direct Video)", style=ButtonStyle.PRIMARY, web_app=WebAppInfo(url=player_url))
                 ])
             else:
                 buttons.append([
-                    InlineKeyboardButton("🎬 Watch Online (Cinema HD)", style=ButtonStyle.SUCCESS, url=player_url)
+                    InlineKeyboardButton("▶️ Watch Online (Direct Video)", style=ButtonStyle.PRIMARY, url=player_url)
                 ])
 
         msg_text = (

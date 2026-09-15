@@ -286,11 +286,11 @@ async def _resolve_unwrapped(link: str, surl_id: str) -> dict:
         ] + list(official_res.get("alt_links") or [])
         worker_dlink = await _get_worker_direct(link)
         ordered = []
+        if worker_dlink and worker_dlink not in ordered:
+            ordered.append(worker_dlink)
         for l in session_links:
             if l and l not in ordered:
                 ordered.append(l)
-        if worker_dlink and worker_dlink not in ordered:
-            ordered.append(worker_dlink)
         official_res["download_link"] = ordered[0] if ordered else ""
         official_res["alt_links"] = ordered[1:]
         return official_res
