@@ -711,15 +711,27 @@ async def handle_link(client: Client, message: Message, link: str, status_msg=No
         }
 
         buttons = []
+        host = _get_player_host()
         if is_video and download_link:
+            iteraplay_url = f"{host}/iteraplay?url={quote_plus(link)}" if host else f"https://iteraplay.com/?url={quote_plus(link)}"
             player_url = _get_player_url(download_link, file_name, file_size, file_info.get("alt_links") or [])
-            if player_url.startswith("https://"):
+            
+            if iteraplay_url.startswith("https://"):
                 buttons.append([
-                    InlineKeyboardButton("▶️ Watch Online (Web App)", style=ButtonStyle.PRIMARY, web_app=WebAppInfo(url=player_url))
+                    InlineKeyboardButton("▶️ Watch Online (iTeraPlay)", style=ButtonStyle.PRIMARY, web_app=WebAppInfo(url=iteraplay_url))
                 ])
             else:
                 buttons.append([
-                    InlineKeyboardButton("▶️ Watch Online", style=ButtonStyle.PRIMARY, url=player_url)
+                    InlineKeyboardButton("▶️ Watch Online (iTeraPlay)", style=ButtonStyle.PRIMARY, url=iteraplay_url)
+                ])
+                
+            if player_url.startswith("https://"):
+                buttons.append([
+                    InlineKeyboardButton("🎬 Watch Online (Cinema HD)", style=ButtonStyle.SUCCESS, web_app=WebAppInfo(url=player_url))
+                ])
+            else:
+                buttons.append([
+                    InlineKeyboardButton("🎬 Watch Online (Cinema HD)", style=ButtonStyle.SUCCESS, url=player_url)
                 ])
 
         msg_text = (
@@ -2510,6 +2522,88 @@ def _start_health_server():
                 logger.warning(f"Stream proxy error: {e}")
                 return web.Response(text=f"Proxy error: {e}", status=500)
 
+        async def handle_iteraplay(request):
+            raw_target_url = request.query.get("url")
+            if not raw_target_url:
+                return web.Response(text="Missing url parameter", status=400)
+            
+            iteraplay_target = f"https://iteraplay.com/?url={quote_plus(raw_target_url)}"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                "Referer": "https://iteraplay.com/",
+            }
+            
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(iteraplay_target, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        if resp.status != 200:
+                            return web.Response(text="Failed to fetch iteraplay player", status=resp.status)
+                        
+                        html = await resp.text()
+                        
+                        # Rewrite relative URLs to absolute iteraplay URLs
+                        html = html.replace('href="/_next/', 'href="https://iteraplay.com/_next/')
+                        html = html.replace('src="/_next/', 'src="https://iteraplay.com/_next/')
+                        html = html.replace('href="/static/', 'href="https://iteraplay.com/static/')
+                        html = html.replace('src="/static/', 'src="https://iteraplay.com/static/')
+                        html = html.replace('href="/favicon', 'href="https://iteraplay.com/favicon')
+                        
+                        # Inject CSS that hides all headers, footers, promo texts, blog links, and makes player full screen
+                        clean_css = """
+                        <style>
+                            header, nav, footer, #faq,
+                            [class*="announcement"], [class*="banner"], [class*="promo"], [class*="blog"],
+                            [class*="navbar"], [class*="footer"], [class*="sidebar"],
+                            h1, h2, h3, p, label, div:has(> h1), div:has(> h2), div:has(> p),
+                            a[href*="blog"], a[href*="telegram"], a[href*="teraviral"],
+                            .py-12, .py-8, .my-8, .mt-8, .mb-8, .gap-6,
+                            div:has(> button:not([class*="play"])):not(:has(video)):not(:has(iframe)) {
+                                display: none !important;
+                            }
+                            body, html, main {
+                                background-color: #05070e !important;
+                                margin: 0 !important;
+                                padding: 0 !important;
+                                overflow: hidden !important;
+                                width: 100vw !important;
+                                height: 100vh !important;
+                            }
+                            .aspect-video, [class*="aspect-video"], video, iframe, div:has(> video) {
+                                position: fixed !important;
+                                top: 0 !important;
+                                left: 0 !important;
+                                width: 100vw !important;
+                                height: 100vh !important;
+                                max-width: 100vw !important;
+                                max-height: 100vh !important;
+                                margin: 0 !important;
+                                padding: 0 !important;
+                                border: none !important;
+                                border-radius: 0 !important;
+                                object-fit: contain !important;
+                                z-index: 999999 !important;
+                            }
+                        </style>
+                        """
+                        
+                        if "</head>" in html:
+                            html = html.replace("</head>", f"{clean_css}</head>")
+                        else:
+                            html = clean_css + html
+                        
+                        return web.Response(
+                            text=html,
+                            content_type="text/html",
+                            headers={
+                                "Access-Control-Allow-Origin": "*",
+                                "Access-Control-Allow-Headers": "*",
+                            }
+                        )
+            except Exception as e:
+                logger.warning(f"Iteraplay proxy error: {e}")
+                return web.Response(text=f"Iteraplay error: {e}", status=500)
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         web_app = web.Application()
@@ -2519,6 +2613,8 @@ def _start_health_server():
         web_app.router.add_get("/index.html", handle_player)
         web_app.router.add_get("/stream_proxy", handle_stream_proxy)
         web_app.router.add_options("/stream_proxy", handle_options)
+        web_app.router.add_get("/iteraplay", handle_iteraplay)
+        web_app.router.add_options("/iteraplay", handle_options)
         runner = web.AppRunner(web_app, access_log=None)
         loop.run_until_complete(runner.setup())
         site = web.TCPSite(runner, "0.0.0.0", port)
