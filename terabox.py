@@ -543,11 +543,11 @@ def _fetch_official_sync(
                 continue
 
     ordered: list[str] = []
-    for link in candidate_links:
-        if link not in ordered:
-            ordered.append(link)
-    if stream_link and stream_link not in ordered:
+    if stream_link:
         ordered.append(stream_link)
+    for link in candidate_links:
+        if link and link not in ordered:
+            ordered.append(link)
 
     download_link = ordered[0] if ordered else ""
     alt_links = ordered[1:] if len(ordered) > 1 else []
