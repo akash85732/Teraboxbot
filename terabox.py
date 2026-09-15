@@ -87,15 +87,18 @@ def resolve_redirect_url(url: str) -> str:
     """Follow HTTP redirects to obtain canonical TeraBox URL (e.g. terasharefile.com -> 1024tera.com/sharing/link?surl=...)."""
     if not url:
         return url
+    parsed = urlparse(url)
+    if "/s/" in parsed.path or "surl=" in parsed.query:
+        return url
     headers = get_headers()
     try:
-        r = requests.head(url, headers=headers, allow_redirects=True, timeout=5)
+        r = requests.head(url, headers=headers, allow_redirects=True, timeout=3)
         if r.url and r.url != url:
             return r.url
     except Exception:
         pass
     try:
-        r = requests.get(url, headers=headers, allow_redirects=True, timeout=5)
+        r = requests.get(url, headers=headers, allow_redirects=True, timeout=3)
         if r.url:
             return r.url
     except Exception:
