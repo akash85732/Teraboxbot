@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>TeraBox Cinema Web Player</title>
+  <title>Cinema Web Player</title>
 
   <!-- Telegram WebApp SDK -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
@@ -116,7 +116,7 @@
       position: relative;
     }
 
-    /* Top Cinema Navigation Header */
+    /* Clean Unbranded Navigation Header */
     .cinema-header {
       display: flex;
       align-items: center;
@@ -913,15 +913,15 @@
   </div>
 
   <div class="app-viewport">
-    <!-- Header -->
+    <!-- Clean Watermark-Free Header -->
     <header class="cinema-header">
       <div class="brand-group">
         <div class="brand-icon">
-          <i class="fa-solid fa-film"></i>
+          <i class="fa-solid fa-play"></i>
         </div>
         <div class="brand-text">
-          <span class="brand-name">TeraBox Cinema</span>
-          <span class="brand-tag">Ultra HD WebApp Player</span>
+          <span class="brand-name">Cinema Web Player</span>
+          <span class="brand-tag">Ultra HD Stream</span>
         </div>
       </div>
 
@@ -1074,7 +1074,7 @@
     <div class="error-card" id="errorCard">
       <i class="fa-solid fa-triangle-exclamation"></i>
       <h3>Stream Could Not Be Loaded</h3>
-      <p>TeraBox video link expired ho gaya hai ya connection blocked hai. Please Telegram bot me naya link generate karein.</p>
+      <p>Video link expired ho gaya hai ya connection blocked hai. Please bot me naya link generate karein.</p>
       <button class="reload-btn-main action-btn" onclick="closeWebApp()" style="margin-top: 10px; max-width: 240px;">
         <i class="fa-solid fa-arrow-left"></i> Back to Telegram
       </button>
@@ -1102,7 +1102,7 @@
     const urlParams = new URLSearchParams(window.location.search);
     const rawUrl = urlParams.get('url');
     const altUrl = urlParams.get('alt');
-    const rawTitle = urlParams.get('title') || 'TeraBox Stream Video';
+    const rawTitle = urlParams.get('title') || 'Stream Video';
     const rawSize = parseInt(urlParams.get('size') || '0', 10);
 
     // Format Bytes Helper
@@ -1228,7 +1228,15 @@
         currentHls = null;
       }
 
-      const isM3U8 = finalTarget.includes('.m3u8') || finalTarget.includes('type=M3U8');
+      // Robust M3U8 HLS Detection (handles percent-encoded & proxied URLs)
+      const decodedTarget = decodeURIComponent(finalTarget);
+      const isM3U8 = finalTarget.includes('.m3u8') || 
+                     finalTarget.includes('type=M3U8') || 
+                     finalTarget.includes('type%3DM3U8') || 
+                     decodedTarget.includes('.m3u8') || 
+                     decodedTarget.includes('type=M3U8') || 
+                     decodedTarget.includes('streaming') || 
+                     decodedTarget.includes('share/streaming');
 
       if (isM3U8 && Hls.isSupported()) {
         currentHls = new Hls({
