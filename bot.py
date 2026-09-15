@@ -2460,7 +2460,7 @@ def _start_health_server():
                     
                     if ".m3u8" in target_url or "type=M3U8" in target_url or "mpegurl" in content_type.lower():
                         text = await resp.text()
-                        host_url = str(request.url.origin)
+                        host_url = f"{request.scheme}://{request.host}"
                         new_lines = []
                         for line in text.splitlines():
                             line_str = line.strip()
