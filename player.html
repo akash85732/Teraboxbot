@@ -1216,10 +1216,11 @@
         return;
       }
 
-      // Auto-Proxy raw TeraBox URLs if loaded directly on a reverse proxy host (excluding teraboxdl)
+      // Auto-Proxy raw TeraBox URLs if loaded directly on a reverse proxy host (excluding teraboxdl and github.io)
       let finalTarget = targetUrl;
+      const isGitHub = window.location.hostname.includes('github.io');
       const isTeraBoxRaw = (targetUrl.includes('1024tera') || targetUrl.includes('terabox.com') || targetUrl.includes('4funbox') || targetUrl.includes('mirrobox')) && !targetUrl.includes('teraboxdl.site');
-      if (isTeraBoxRaw && !targetUrl.includes('/stream_proxy') && window.location.origin.startsWith('http')) {
+      if (isTeraBoxRaw && !targetUrl.includes('/stream_proxy') && !isGitHub && window.location.origin.startsWith('http')) {
         finalTarget = window.location.origin + '/stream_proxy?url=' + encodeURIComponent(targetUrl);
       }
 
