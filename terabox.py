@@ -18,11 +18,14 @@ Flow (no user-facing cookie system):
 
 import re
 import json
+import time
+import random
+import hashlib
 import logging
 import socket
 import asyncio
 from typing import Optional
-from urllib.parse import urlparse, parse_qs, quote
+from urllib.parse import urlparse, parse_qs, quote, urlencode, unquote
 
 import aiohttp
 import requests
@@ -30,9 +33,21 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-from cookie import load_cookie_header
+from cookie import load_cookie_header, all_cookie_headers
 
 logger = logging.getLogger(__name__)
+
+# Resolve cache: shared across all users so a single resolved link never
+# re-hammers rate-limited hosts. Positive hits live 20 min, failures only 60s.
+_RESOLVE_CACHE: dict[str, tuple[float, Optional[dict]]] = {}
+_RESOLVE_CACHE_TTL = 20 * 60
+_NEG_CACHE_TTL = 60
+
+# teraboxdl.site 429 -> per-IP burst rate limit. After a 429 we cool down for a
+# bit (skip it entirely) so the shared Render egress IP gets un-banned instead
+# of being re-hammered on every message.
+_TERABOXDL_COOLDOWN_UNTIL = 0.0  # monotonic timestamp
+_TERABOXDL_COOLDOWN_SECS = 90.0
 
 # All known TeraBox domain patterns
 TERABOX_DOMAINS = [
@@ -44,6 +59,10 @@ TERABOX_DOMAINS = [
     r"freeterabox[a-z0-9-]*\.[a-z]+",
     r"flexcom[a-z0-9-]*\.[a-z]+",
     r"terasharefile[a-z0-9-]*\.[a-z]+",
+    r"terafileshare[a-z0-9-]*\.[a-z]+",
+    r"terashare[a-z0-9-]*\.[a-z]+",
+    r"gibox[a-z0-9-]*\.[a-z]+",
+    r"momole[a-z0-9-]*\.[a-z]+",
 ]
 
 TERABOX_PATTERN = re.compile(
@@ -60,6 +79,28 @@ TERABOX_PATTERN = re.compile(
 JS_TOKEN_RE = re.compile(r"fn%28%22([0-9A-Fa-f]+)%22")
 JS_TOKEN_RE_ALT = re.compile(r'fn\("([0-9A-Fa-f]+)"\)')
 JS_TOKEN_RE_RAW = re.compile(r"window\.jsToken\s*=\s*\"([0-9A-Fa-f]+)\"")
+JS_TOKEN_RE_2 = re.compile(r"jsToken\s*[=:]\s*[\"']([0-9A-Fa-f]{32,})[\"']")
+JS_TOKEN_RE_3 = re.compile(r"[\"']jsToken[\"']\s*:\s*[\"']([0-9A-Fa-f]{32,})[\"']")
+
+
+def resolve_redirect_url(url: str) -> str:
+    """Follow HTTP redirects to obtain canonical TeraBox URL (e.g. terasharefile.com -> 1024tera.com/sharing/link?surl=...)."""
+    if not url:
+        return url
+    headers = get_headers()
+    try:
+        r = requests.head(url, headers=headers, allow_redirects=True, timeout=5)
+        if r.url and r.url != url:
+            return r.url
+    except Exception:
+        pass
+    try:
+        r = requests.get(url, headers=headers, allow_redirects=True, timeout=5)
+        if r.url:
+            return r.url
+    except Exception:
+        pass
+    return url
 
 
 def extract_terabox_links(text: str) -> list[str]:
@@ -104,10 +145,47 @@ def get_headers() -> dict:
 
 def _extract_js_token(html: str) -> str:
     """Extract jsToken from the share page HTML (percent-encoded or decoded)."""
-    for pattern in (JS_TOKEN_RE, JS_TOKEN_RE_ALT, JS_TOKEN_RE_RAW):
+    for pattern in (JS_TOKEN_RE, JS_TOKEN_RE_ALT, JS_TOKEN_RE_RAW, JS_TOKEN_RE_2, JS_TOKEN_RE_3):
         m = pattern.search(html)
         if m and m.group(1):
             return m.group(1)
+    return ""
+
+
+def _dp_logid() -> str:
+    """TeraBox-format dp-logid header used by /api/shorturlinfo & /share/streaming."""
+    ts = str(int(time.time()))[-3:][::-1]
+    raw = "0302" + ts + str(random.randint(1000000, 9999999))
+    return raw + "-" + hashlib.md5(raw.encode()).hexdigest().upper()[:8] + "-77"
+
+
+def _wap_js_token(s: requests.Session, base_url: str, surl_id: str) -> str:
+    """Extract jsToken via the mobile /wap/share/filelist endpoint.
+
+    Works even from datacenter IPs where the desktop share page is replaced
+    by a bot-check. Falls back to trying both the stripped and raw short id.
+    """
+    short = surl_id[1:] if surl_id[:1] in ("1", "0") and len(surl_id) > 8 else surl_id
+    variants = list(dict.fromkeys([short, surl_id]))
+    for vs in variants:
+        try:
+            r = s.get(
+                f"{base_url}/wap/share/filelist?surl={vs}&clearCache=1",
+                timeout=15,
+            )
+            if r.status_code != 200:
+                continue
+            html = r.text
+            tok = _extract_js_token(html)
+            if tok:
+                return tok
+            m = re.search(r"eval\(decodeURIComponent\(`([^`]+)`\)\)", html)
+            if m:
+                tok = _extract_js_token(unquote(m.group(1)))
+                if tok:
+                    return tok
+        except Exception:
+            continue
     return ""
 
 
@@ -135,50 +213,92 @@ async def get_file_info(link: str) -> Optional[dict]:
     Fetch file info from TeraBox including download candidates.
 
     Returns dict with: filename, size, thumbnail, download_link, alt_links,
-    is_dir, error. Or None on failure.
+    is_dir, error. Or None on failure. Results are cached per short-id so
+    repeated shares never hammer rate-limited resolvers.
     """
-    surl_id = await _get_short_url_id(link)
+    resolved_link = await asyncio.to_thread(resolve_redirect_url, link)
+    surl_id = await _get_short_url_id(resolved_link) or await _get_short_url_id(link)
     if not surl_id:
-        logger.error(f"Could not extract surl from: {link}")
+        logger.error(f"Could not extract surl from: {link} (resolved: {resolved_link})")
         return {"error": "Could not parse TeraBox short link URL."}
 
-    try:
-        cookie_header = load_cookie_header()
-    except Exception:
-        cookie_header = ""
+    cached = _RESOLVE_CACHE.get(surl_id)
+    if cached:
+        ts, res = cached
+        is_err = bool(res.get("error"))
+        ttl = _NEG_CACHE_TTL if is_err else _RESOLVE_CACHE_TTL
+        if time.time() - ts < ttl:
+            logger.info(f"resolve cache hit for {surl_id} (error={is_err})")
+            return res
 
-    parsed = urlparse(link)
-    link_origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+    result = await _resolve_unwrapped(resolved_link, surl_id)
+    _RESOLVE_CACHE[surl_id] = (time.time(), result)
+    return result
+
+
+async def _resolve_unwrapped(link: str, surl_id: str) -> dict:
+    """Actual resolve logic (no caching)."""
+    try:
+        cookie_headers = all_cookie_headers()
+    except Exception:
+        cookie_headers = []
+    try:
+        round_robin_cookie = load_cookie_header()
+    except Exception:
+        round_robin_cookie = ""
+    # Rotate the pool so repeated requests don't always hit the same account.
+    # The first attempt uses the round-robin cookie, then the rest of the pool.
+    ordered_cookies = []
+    if round_robin_cookie and round_robin_cookie not in ordered_cookies:
+        ordered_cookies.append(round_robin_cookie)
+    for c in cookie_headers:
+        if c and c not in ordered_cookies:
+            ordered_cookies.append(c)
+    # Always include "" last so cookies can never make things *worse*.
+    ordered_cookies.append("")
 
     apis = [
         "https://www.1024tera.com",
         "https://www.terabox.app",
         "https://www.terabox.com",
+        "https://www.1024terabox.com",
         "https://freeterabox.com",
+        "https://www.4funbox.com",
+        "https://www.mirrobox.com",
+        "https://www.nephobox.com",
     ]
-    if link_origin and link_origin not in apis:
-        apis.insert(0, link_origin)
 
-    # PRIMARY: Official TeraBox APIs (session + jsToken + optional cookie)
-    official_res = await _first_working_official(
-        apis, surl_id, cookie_header
-    )
+    # PRIMARY: Official TeraBox APIs with the user's cookie.
+    official_res = None
+    for i, cookie_header in enumerate(ordered_cookies):
+        if cookie_header:
+            logger.info(f"Trying official API with cookie #{i + 1}/{len(ordered_cookies) - 1}"
+                        f" (account {i + 1})")
+        official_res = await _first_working_official(apis, surl_id, cookie_header)
+        if official_res:
+            break
     if official_res:
-        # Boost with instant worker direct link when available - gives Telegram
-        # a URL it can fetch itself (near-instant delivery) and gives the
-        # downloader the fastest CDN candidate.
-        try:
-            worker_dlink = await _get_worker_direct(link)
-            if worker_dlink:
-                current = official_res.get("download_link") or ""
-                official_res["alt_links"] = [
-                    l for l in ([current] + list(official_res.get("alt_links", [])))
-                    if l and l != worker_dlink
-                ]
-                official_res["download_link"] = worker_dlink
-        except Exception as e:
-            logger.warning(f"Worker direct link boost failed: {e}")
+        session_links = [
+            official_res.get("download_link") or "",
+        ] + list(official_res.get("alt_links") or [])
+        worker_dlink = await _get_worker_direct(link)
+        ordered = []
+        for l in session_links:
+            if l and l not in ordered:
+                ordered.append(l)
+        if worker_dlink and worker_dlink not in ordered:
+            ordered.append(worker_dlink)
+        official_res["download_link"] = ordered[0] if ordered else ""
+        official_res["alt_links"] = ordered[1:]
         return official_res
+
+    # SECONDARY: teraboxdl.site worker -> cookie-free direct dl-worker link.
+    try:
+        worker_res = await _worker_teraboxdl_site(link)
+        if worker_res:
+            return worker_res
+    except Exception as e:
+        logger.warning(f"teraboxdl.site (fallback) failed: {e}")
 
     # FALLBACK: Third-party worker APIs (last resort)
     try:
@@ -193,67 +313,42 @@ async def get_file_info(link: str) -> Optional[dict]:
 
 async def _get_worker_direct(link: str) -> str:
     """
-    Fetch an instant cookie-free worker direct link from multiple gateway APIs
-    (in parallel). These dl-worker.teraboxdl.site / worker.dev links need no
-    cookies, so Telegram's own servers can download them directly - enabling
-    near-instant delivery with no VPS-side re-upload at all.
+    Fetch an instant cookie-free worker full-file direct link.
+
+    Cookie/session (/share/download, /share/streaming) se datacenter IP par
+    poori file nahi milti - ya to verify_v2 aata hai, ya sirf partial HLS
+    window. dl-worker direct link poora original file deta hai, isliye ise
+    candidate list me sabse pehle rakha jaata hai taaki download atke na.
     """
-
-    def _worker_teraboxdl_site() -> str:
-        try:
-            s = requests.Session()
-            s.verify = False
-            r = s.post(
-                "https://api.teraboxdl.site/api/test",
-                json={"url": link},
-                timeout=6,
-            )
-            data = r.json()
-            if data.get("status") == "success" and "data" in data and "list" in data["data"]:
-                items = data["data"]["list"]
-                if items:
-                    return items[0].get("direct_link") or items[0].get("stream_download_url") or ""
-        except Exception as e:
-            logger.warning(f"teraboxdl.site API failed: {e}")
-        return ""
-
-    def _worker_nepcoder() -> str:
-        try:
-            r = requests.get(
-                f"https://teraboxvideodownloader.nepcoderdevs.workers.dev/api?data={quote(link)}",
-                headers=get_headers(),
-                timeout=8,
-            )
-            res = _extract_worker_result(r.json())
-            if res:
-                return res.get("download_link", "") or ""
-        except Exception as e:
-            logger.warning(f"nepcoder worker failed: {e}")
-        return ""
-
-    def _worker_uday() -> str:
-        try:
-            r = requests.get(
-                f"https://terabox.udayscriptsx.workers.dev/api?data={quote(link)}",
-                headers=get_headers(),
-                timeout=8,
-            )
-            res = _extract_worker_result(r.json())
-            if res:
-                return res.get("download_link", "") or ""
-        except Exception as e:
-            logger.warning(f"uday worker failed: {e}")
-        return ""
-
-    results = await asyncio.gather(
-        asyncio.to_thread(_worker_teraboxdl_site),
-        asyncio.to_thread(_worker_nepcoder),
-        asyncio.to_thread(_worker_uday),
-    )
-    for d in results:
-        if d:
-            logger.info(f"Worker direct link obtained: {d[:60]}...")
-            return d
+    url = link if link.startswith("http") else f"https://{link}"
+    timeout = aiohttp.ClientTimeout(total=15)
+    headers = get_headers()
+    try:
+        connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
+        async with aiohttp.ClientSession(
+            timeout=timeout, connector=connector
+        ) as session:
+            async with session.post(
+                "https://api.teraboxdl.site/api/test", json={"url": url}
+            ) as resp:
+                if resp.status != 200:
+                    return ""
+                data = await resp.json(content_type=None)
+                if data.get("status") != "success" or "data" not in data:
+                    return ""
+                items = data["data"].get("list") or []
+                if not items:
+                    return ""
+                item = items[0]
+                return (
+                    item.get("stream_download_url")
+                    or item.get("stream_url")
+                    or item.get("direct_link")
+                    or item.get("download_link")
+                    or ""
+                )
+    except Exception as e:
+        logger.warning(f"teraboxdl.site worker direct link failed: {e}")
     return ""
 
 
@@ -278,55 +373,77 @@ def _fetch_official_sync(
     base_url: str, surl_id: str, cookie_header: str = ""
 ) -> Optional[dict]:
     """
-    Session-based extraction using requests Session to transparently follow cross-domain redirects.
+    Session-based extraction using requests Session.
+
+    Uses the mobile /wap/share/filelist endpoint for jsToken (works even from
+    datacenter IPs), then calls /api/shorturlinfo with full params and builds
+    ordered download candidates.
     """
     headers = get_headers()
     s = requests.Session()
     s.headers.update(headers)
-    s.verify = False
+    s.headers.pop("Origin", None)
 
     if cookie_header:
         s.headers["Cookie"] = cookie_header
 
-    # Step 1: Visit the share page to get browser-like session + jsToken
-    final_url = f"{base_url}/s/{surl_id}"
     real_base = base_url
-    js_token = ""
-
-    try:
-        r = s.get(f"{base_url}/s/{surl_id}", timeout=15)
-        if r.status_code == 200:
-            js_token = _extract_js_token(r.text)
-            final_url = r.url
-            parsed = urlparse(final_url)
-            real_base = f"{parsed.scheme}://{parsed.netloc}"
-    except Exception as e:
-        logger.warning(f"Share page fetch failed for {base_url}: {e}")
-        return None
-
+    js_token = _wap_js_token(s, base_url, surl_id)
     if not js_token:
-        logger.warning(f"No jsToken for {base_url} - skipping shorturlinfo")
-        return None
+        logger.warning(f"No wap jsToken for {base_url} - trying shorturlinfo without it")
+    else:
+        logger.info(f"wap jsToken obtained for {base_url}")
 
-    # Step 2: shorturlinfo (official API)
-    info_url = f"{real_base}/api/shorturlinfo?shorturl={surl_id}&root=1&p=1&jsToken={js_token}"
-    api_headers = dict(headers)
-    api_headers["Referer"] = final_url
-    api_headers["Origin"] = real_base
-    if cookie_header:
-        api_headers["Cookie"] = cookie_header
+    # Try candidate shorturl formats (with leading 1, stripped, raw)
+    shorturl_candidates = [
+        f"1{surl_id}" if not surl_id.startswith("1") else surl_id,
+        surl_id[1:] if surl_id.startswith("1") and len(surl_id) > 8 else surl_id,
+        surl_id,
+    ]
+    shorturl_candidates = list(dict.fromkeys(shorturl_candidates))
 
-    try:
-        r2 = s.get(info_url, headers=api_headers, timeout=15)
-        if r2.status_code != 200:
-            return None
-        data = r2.json()
-    except Exception as e:
-        logger.warning(f"shorturlinfo failed for {real_base}: {e}")
+    data = None
+    for s_cand in shorturl_candidates:
+        params = {
+            "app_id": "250528",
+            "shorturl": s_cand,
+            "root": "1",
+            "web": "1",
+            "channel": "dubox",
+            "clienttype": "0",
+            "jsToken": js_token,
+            "t": str(int(time.time())),
+            "dp-logid": _dp_logid(),
+        }
+        info_url = f"{real_base}/api/shorturlinfo?" + urlencode(params)
+        api_headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": f"{real_base}/",
+            "User-Agent": headers["User-Agent"],
+        }
+        if cookie_header:
+            api_headers["Cookie"] = cookie_header
+
+        try:
+            r2 = s.get(info_url, headers=api_headers, timeout=12)
+            if r2.status_code == 200:
+                try:
+                    res_json = r2.json()
+                    if res_json.get("errno") in (0, -7) and res_json.get("list"):
+                        data = res_json
+                        break
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"shorturlinfo candidate {s_cand} failed for {real_base}: {e}")
+
+    if not data:
         return None
 
     errno = data.get("errno", -1)
     if errno not in (0, -7):
+        logger.warning(f"shorturlinfo errno={errno} for {real_base}")
         return None
 
     file_list = data.get("list", [])
@@ -375,10 +492,10 @@ def _fetch_official_sync(
         share_dlink = (
             f"{real_base}/share/download"
             f"?app_id=250528&web=1&channel=dubox&clienttype=0"
-            f"&shorturl={surl_id}"
+            f"&shorturl={quote(surl_id, safe='')}"
             f"&shareid={shareid}"
             f"&uk={uk}"
-            f"&fid_list=%5B{fs_id}%5D"
+            f"&fid_list={quote('[' + str(fs_id) + ']', safe='')}"
         )
         if sign_qs:
             share_dlink += f"&{sign_qs}"
@@ -388,39 +505,49 @@ def _fetch_official_sync(
             candidate_links.append(share_dlink)
             seen.add(share_dlink)
 
-    raw_path = file_info.get("path", "")
     stream_link = ""
-    if fs_id and uk and shareid and raw_path and data.get("sign"):
-        for stream_type in (
-            "M3U8_AUTO_1080",
-            "M3U8_AUTO_720",
-            "M3U8_AUTO_480",
-        ):
-            stream_candidate = (
-                f"{real_base}/share/streaming"
-                f"?app_id=250528&channel=dubox&clienttype=0"
-                f"&type={stream_type}"
-                f"&path={quote(raw_path)}"
-                f"&uk={uk}"
-                f"&shareid={shareid}"
-                f"&fid={fs_id}"
-                f"&sign={data.get('sign')}"
-                f"&timestamp={data.get('timestamp')}"
+    if fs_id and uk and shareid:
+        sign = file_info.get("sign") or data.get("sign", "")
+        ts = file_info.get("timestamp") or data.get("timestamp")
+        for stream_type in ("M3U8_AUTO_480", "M3U8_AUTO_720", "M3U8_AUTO_1080"):
+            stream_candidate = f"{real_base}/share/streaming?" + urlencode({
+                "uk": str(uk),
+                "shareid": str(shareid),
+                "type": stream_type,
+                "fid": str(fs_id),
+                "sign": sign,
+                "timestamp": str(ts) if ts else "",
+                "jsToken": "",
+                "esl": "1",
+                "isplayer": "1",
+                "ehps": "1",
+                "clienttype": "0",
+                "app_id": "250528",
+                "web": "1",
+                "channel": "dubox",
+                "dp-logid": _dp_logid(),
+            })
+            stream_headers = dict(api_headers)
+            stream_headers["Referer"] = (
+                f"{real_base}/share/verify?shareid={shareid}&uk={uk}"
             )
             try:
-                s_resp = s.get(stream_candidate, headers=api_headers, timeout=5)
-                if s_resp.status_code == 200 and s_resp.text.strip().startswith("#EXTM3U"):
+                s_resp = s.get(stream_candidate, headers=stream_headers, timeout=6)
+                if (
+                    s_resp.status_code == 200
+                    and s_resp.text.strip().startswith("#EXTM3U")
+                ):
                     stream_link = stream_candidate
                     break
             except Exception:
                 continue
 
     ordered: list[str] = []
-    if stream_link:
-        ordered.append(stream_link)
     for link in candidate_links:
         if link not in ordered:
             ordered.append(link)
+    if stream_link and stream_link not in ordered:
+        ordered.append(stream_link)
 
     download_link = ordered[0] if ordered else ""
     alt_links = ordered[1:] if len(ordered) > 1 else []
@@ -444,13 +571,17 @@ async def _try_api_endpoint(
 
 async def _try_third_party_api(link: str) -> Optional[dict]:
     """Try third-party TeraBox API worker extractors (last resort)."""
-    apis = [
-        f"https://teraboxvideodownloader.nepcoderdevs.workers.dev/api?data={quote(link)}",
-        f"https://terabox.udayscriptsx.workers.dev/api?data={quote(link)}",
-    ]
-
-    timeout = aiohttp.ClientTimeout(total=12)
+    timeout = aiohttp.ClientTimeout(total=15)
     headers = get_headers()
+
+    apis = [
+        f"https://teraboxvideodownloader.nepcoderdevs.workers.dev/api?url={quote(link)}",
+        f"https://terabox.udayscriptsx.workers.dev/api?url={quote(link)}",
+        f"https://tb-api.freeterabox.workers.dev/api?url={quote(link)}",
+        f"https://yt-api.freeterabox.workers.dev/api?url={quote(link)}",
+        f"https://terabox-api.vipan.workers.dev/api?url={quote(link)}",
+        f"https://terabox-dl.vipan.workers.dev/api?url={quote(link)}",
+    ]
 
     for api_url in apis:
         try:
@@ -467,16 +598,101 @@ async def _try_third_party_api(link: str) -> Optional[dict]:
             logger.warning(f"Third party API {api_url} failed: {e}")
             continue
 
-    # Last resort fallback: TeraDownloadr (slow WordPress nonce flow)
-    try:
-        from teradownloadr import fetch_teradownloadr
-        td_res = await fetch_teradownloadr(link)
-        if td_res and td_res.get("download_link"):
-            return td_res
-    except Exception as e:
-        logger.warning(f"TeraDownloadr API fallback failed: {e}")
-
     return None
+
+
+def _worker_teraboxdl_site_sync(link: str) -> Optional[dict]:
+    """Query the teraboxdl.site POST API (returns file info + cookie-free direct link).
+
+    The response exposes three independent download paths for the exact same
+    file:
+      1. direct_link         - full original quality (dl-worker CDN)
+      2. stream_download_url - transcoded MP4 served by api.teraboxdl.site
+      3. stream_url          - HLS playlist (teraboxdl proxied segments)
+    All three are returned as ordered candidates so the downloader auto-falls
+    back if one host dies. The API is retried a few times because it 500s /
+    read-time-outs sporadically.
+    """
+    url = link if link.startswith("http") else f"https://{link}"
+
+    global _TERABOXDL_COOLDOWN_UNTIL
+    if time.monotonic() < _TERABOXDL_COOLDOWN_UNTIL:
+        logger.warning(
+            f"teraboxdl.site on cooldown "
+            f"({int(_TERABOXDL_COOLDOWN_UNTIL - time.monotonic())}s left) - skipping"
+        )
+        return None
+
+    for attempt in range(1, 3):
+        try:
+            s = requests.Session()
+            s.verify = False
+            r = s.post(
+                "https://api.teraboxdl.site/api/test",
+                json={"url": url},
+                timeout=20,
+            )
+            if r.status_code == 429:
+                _TERABOXDL_COOLDOWN_UNTIL = (
+                    time.monotonic() + _TERABOXDL_COOLDOWN_SECS
+                )
+                raise RuntimeError("HTTP 429 rate-limited (cooldown set)")
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            data = r.json()
+            if data.get("status") != "success" or "data" not in data:
+                raise RuntimeError(data.get("message") or "status != success")
+            inner = data["data"]
+            file_list = inner.get("list") or []
+            if not file_list:
+                raise RuntimeError("empty list")
+            item = file_list[0]
+            filename = item.get("server_filename") or item.get("filename") or "terabox_video.mp4"
+            size = int(item.get("size", item.get("size_bytes", 0)) or 0)
+            is_dir = str(item.get("isdir", "0")) == "1"
+            if is_dir:
+                return None
+
+            dlink = (
+                item.get("stream_download_url")
+                or item.get("stream_url")
+                or item.get("direct_link")
+                or item.get("download_link")
+                or ""
+            )
+            if not dlink:
+                raise RuntimeError("no direct link in response")
+
+            alts: list[str] = []
+            for cand in (
+                item.get("stream_url", ""),
+                item.get("direct_link", ""),
+                item.get("download_link", ""),
+            ):
+                if cand and cand != dlink and cand not in alts:
+                    alts.append(cand)
+
+            thumbnail = (item.get("thumbs") or {}).get("url3", "") or ""
+            return {
+                "filename": filename,
+                "size": size,
+                "thumbnail": thumbnail,
+                "download_link": dlink,
+                "alt_links": alts,
+                "is_dir": False,
+            }
+        except Exception as e:
+            logger.warning(
+                f"teraboxdl.site attempt {attempt}/2 failed: {e}"
+            )
+            if attempt < 2:
+                time.sleep(1.5 * attempt)
+    return None
+
+
+async def _worker_teraboxdl_site(link: str) -> Optional[dict]:
+    """Async wrapper for teraboxdl.site query."""
+    return await asyncio.to_thread(_worker_teraboxdl_site_sync, link)
 
 
 def _extract_worker_result(data) -> Optional[dict]:

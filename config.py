@@ -12,40 +12,36 @@ class Config:
 
     # Bot settings
     DUMP_CHANNEL_ID = int(os.environ.get("DUMP_CHANNEL_ID", 0))
-    OWNER_ID = int(os.environ.get("OWNER_ID", 0))
-    MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", 2147483648))  # 2GB default
+    OWNER_ID = os.environ.get("OWNER_ID", "8558893620")
+    MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", 2147483648))
     WORKERS = int(os.environ.get("WORKERS", 8))
 
-    # Force Subscribe Channel (ID or Username, e.g. -1001234567890 or @MyChannel)
+    # Force Subscribe Channel & Video Channel
     FSUB_CHANNEL = os.environ.get("FSUB_CHANNEL", "")
+    VIDEO_CHANNEL = os.environ.get("VIDEO_CHANNEL", "https://t.me/+WYcJaky6mSIzMzU1")
 
-    # Auto Delete Settings
-    AUTO_DELETE_SECONDS = int(os.environ.get("AUTO_DELETE_SECONDS", 600))  # 10 minutes (600s)
+    # Auto Delete Settings (in seconds)
+    AUTO_DELETE_SECONDS = int(os.environ.get("AUTO_DELETE_SECONDS", 600))
 
-    # MongoDB (for user storage & broadcast)
+    # MongoDB URI
     MONGO_URI = os.environ.get("MONGO_URI", "")
 
-    # Health check port for Render
+    # Web App Player URL (Auto-detect Railway or default)
+    WEB_APP_URL = (
+        os.environ.get("WEB_APP_URL", "")
+        or (f"https://{os.environ.get('RAILWAY_PUBLIC_DOMAIN').rstrip('/')}/player" if os.environ.get("RAILWAY_PUBLIC_DOMAIN") else "")
+        or "https://akash85732.github.io/Teraboxbot/player.html"
+    )
+
+    # Health check port
     PORT = int(os.environ.get("PORT", 8080))
 
     # Download settings
     DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "./downloads")
-    CHUNK_SIZE = 1024 * 1024 * 8  # 8MB chunks for maximum download speed
+    CHUNK_SIZE = 1024 * 1024 * 8
     MAX_CONCURRENT_DOWNLOADS = 3
-    DOWNLOAD_TIMEOUT = 600  # 10 minutes max per download
-
-    # Rate limiting
-    RATE_LIMIT_SECONDS = 10  # Min seconds between requests per user
-
-    # TeraBox API endpoints
-    TERABOX_APIS = [
-        "https://www.1024tera.com",
-        "https://www.terabox.app",
-        "https://www.terabox.com",
-        "https://www.4funbox.com",
-        "https://www.mirrobox.com",
-        "https://teraboxapp.com",
-    ]
+    DOWNLOAD_TIMEOUT = 600
+    RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT_SECONDS", 0))
 
     @classmethod
     def validate(cls):
@@ -57,6 +53,4 @@ class Config:
         if not cls.BOT_TOKEN:
             errors.append("BOT_TOKEN is not set")
         if errors:
-            raise ValueError(
-                "Configuration errors:\n" + "\n".join(f"  - {e}" for e in errors)
-            )
+            raise ValueError("Configuration errors:\n" + "\n".join(f"  - {e}" for e in errors))
