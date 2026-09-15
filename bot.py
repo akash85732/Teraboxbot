@@ -718,19 +718,15 @@ async def handle_link(client: Client, message: Message, link: str, status_msg=No
             buttons.append([
                 InlineKeyboardButton("▶️ Online Player", style=ButtonStyle.PRIMARY, web_app=WebAppInfo(url=fast_player_url))
             ])
-
-        if is_video and download_link:
+        elif is_video and download_link:
             player_url = _get_player_url(download_link, file_name, file_size, file_info.get("alt_links") or [])
             if player_url.startswith("https://"):
                 buttons.append([
-                    InlineKeyboardButton("🎬 Cinema HD Player", style=ButtonStyle.SUCCESS, web_app=WebAppInfo(url=player_url))
+                    InlineKeyboardButton("▶️ Online Player", style=ButtonStyle.PRIMARY, web_app=WebAppInfo(url=player_url))
                 ])
+            else:
                 buttons.append([
-                    InlineKeyboardButton("🌐 Open in Browser", url=player_url)
-                ])
-            elif not surl_id:
-                buttons.append([
-                    InlineKeyboardButton("▶️ Watch Online", style=ButtonStyle.PRIMARY, url=player_url)
+                    InlineKeyboardButton("▶️ Online Player", style=ButtonStyle.PRIMARY, url=player_url)
                 ])
 
         msg_text = (
