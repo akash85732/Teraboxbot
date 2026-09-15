@@ -718,7 +718,7 @@ async def handle_link(client: Client, message: Message, link: str, status_msg=No
                     InlineKeyboardButton("▶️ Watch Online (Full Screen)", style=ButtonStyle.PRIMARY, web_app=WebAppInfo(url=player_url))
                 ])
                 buttons.append([
-                    InlineKeyboardButton("🌐 Open in Browser (Chrome)", style=ButtonStyle.SECONDARY, url=player_url)
+                    InlineKeyboardButton("🌐 Open in Browser (Chrome)", url=player_url)
                 ])
             else:
                 buttons.append([
