@@ -116,6 +116,7 @@ def _get_player_host() -> str:
     railway_domain = (
         os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
         or os.environ.get("RAILWAY_STATIC_URL", "")
+        or os.environ.get("RAILWAY_TCP_PROXY_DOMAIN", "")
     ).strip()
     if railway_domain:
         if not railway_domain.startswith("http"):
@@ -125,7 +126,11 @@ def _get_player_host() -> str:
     if render_url:
         return render_url
     base = (getattr(Config, "WEB_APP_URL", "") or "").strip()
-    if base and ("railway.app" in base or "render.com" in base or "onrender.com" in base):
+    if base and ("railway.app" in base or "render.com" in base or "onrender.com" in base or "up.railway.app" in base):
+        p = base.split("/player")[0].rstrip("/")
+        if p:
+            return p
+    if base and base.startswith("https://") and "github.io" not in base:
         p = base.split("/player")[0].rstrip("/")
         if p:
             return p
